@@ -1,0 +1,100 @@
+services:
+
+  frontend:
+    container_name: frontend
+    build:
+      context: ./frontend
+      dockerfile: ./Dockerfile
+      # set the target to prod and rebuild to use production settings
+      target: dev
+    ports:
+      - "8081:3000"
+      - "24678:24678"
+    environment:
+      - NUXT_PUBLIC_APP_VERSION=v9.9.9
+      - NUXT_PUBLIC_API_BASE=http://localhost:8000
+    volumes:
+      - ./frontend:/src
+      - node_modules:/src/node_modules
+    networks:
+      - main
+
+  postgres:
+    container_name: postgres
+    image: postgres:17.2
+    networks:
+      - main
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_HOST_AUTH_METHOD=trust
+
+  pgadmin:
+    container_name: pgadmin
+    image: dpage/pgadmin4:8.3
+    environment:
+      PGADMIN_DEFAULT_EMAIL: pgadmin4@pgadmin.org
+      PGADMIN_DEFAULT_PASSWORD: admin
+    volumes:
+      - pgadmin:/root/.pgadmin
+    ports:
+      - "5050:80"
+    depends_on:
+      - "postgres"
+    networks:
+      - main
+    restart: unless-stopped
+
+  redis:
+    image: redis:alpine
+    volumes:
+      - redis-data:/data
+    container_name: redis
+    networks:
+      - main
+
+  backend: &backend
+    container_name: backend
+    build:
+      context: ./backend
+      target: local
+    command:
+      - "python3"
+      - "manage.py"
+      - "runserver"
+      - "0.0.0.0:8000"
+    volumes:
+      - ./backend:/code
+    ports:
+      - "8000:8000"
+    networks:
+      - main
+    environment:
+      - CELERY_TASK_ALWAYS_EAGER=${CELERY_TASK_ALWAYS_EAGER:-0}
+      - DJANGO_EMAIL_HOST=mailhog
+      - DEBUG=1
+      - POSTGRES_SERVICE_HOST=postgres
+      - REDIS_SERVICE_HOST=redis
+      - DJANGO_SETTINGS_MODULE=backend.settings.development
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-.}
+
+      # celery beat
+      - PIDFILE=
+      - TZ=America/New_York
+    depends_on:
+      - postgres
+      - redis
+
+networks:
+  main:
+    driver: bridge
+
+volumes:
+  pg-data:
+  redis-data:
+  pgadmin:
+  node_modules:
