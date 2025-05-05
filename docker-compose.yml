@@ -89,6 +89,36 @@ services:
       - postgres
       - redis
 
+  celery_worker:
+    <<: *backend
+    container_name: celery_worker
+    command:
+      - "python3"
+      - "manage.py"
+      - "start_celery_worker"
+    ports: []
+    healthcheck:
+      test: ["CMD", "celery", "--app=backend.celery_app:app", "inspect", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+
+  # migrate command
+  migrate:
+    <<: *backend
+    container_name: migrate
+    command:
+      - python3
+      - manage.py
+      - migrate
+    ports: []
+    depends_on:
+      - postgres
+      - redis
+      - backend
+    restart: "on-failure"
+
 networks:
   main:
     driver: bridge

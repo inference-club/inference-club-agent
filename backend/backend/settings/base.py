@@ -10,6 +10,8 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
+
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -25,7 +27,7 @@ SECRET_KEY = "django-insecure-&$dg!381vs$*xu95q%es^3+sps)wpy$d4$1%=j6uf1aqe^u6#k
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = ["*"]
 
 
 # Application definition
@@ -93,6 +95,33 @@ AUTH_PASSWORD_VALIDATORS = [
         "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
     },
 ]
+
+# Celery Settings
+
+REDIS_SERVICE_HOST = os.environ.get("REDIS_SERVICE_HOST", "127.0.0.1")
+REDIS_PORT = 6379
+BROKER_PORT = 1
+RESULTS_PORT = 2
+
+CELERY_BROKER_URL = f"redis://{REDIS_SERVICE_HOST}:{REDIS_PORT}/{BROKER_PORT}"
+CELERY_RESULT_BACKEND = f"redis://{REDIS_SERVICE_HOST}:{REDIS_PORT}/{RESULTS_PORT}"
+CELERY_ACCEPT_CONTENT = ["application/json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+
+CELERY_TASK_DEFAULT_QUEUE = "default"
+
+CELERY_BEAT_SCHEDULE = {
+    "celery-beat-debug-task": {
+        "task": "apps.core.tasks.celery_beat_debug_task",
+        "schedule": 10,
+    },
+}
+
+CELERY_TASK_ALWAYS_EAGER = bool(int(os.environ.get("CELERY_TASK_ALWAYS_EAGER", 0)))
+
+# broker_connection_retry_on_startup
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
 
 # Internationalization
