@@ -119,6 +119,23 @@ services:
       - backend
     restart: "on-failure"
 
+  generate-schema:
+    <<: *backend
+    container_name: schema
+    command:
+      - python3
+      - manage.py
+      - spectacular
+      - --color
+      - --file
+      - static/openapi/schema.yml
+    ports: []
+    depends_on:
+      - postgres
+      - redis
+      - backend
+    restart: "on-failure"
+
 networks:
   main:
     driver: bridge

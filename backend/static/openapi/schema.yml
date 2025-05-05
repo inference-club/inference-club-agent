@@ -1,0 +1,7 @@
+openapi: 3.0.3
+info:
+  title: inference-club-agent
+  version: 1.0.0
+  description: Inference Club Agent
+paths: {}
+components: {}
