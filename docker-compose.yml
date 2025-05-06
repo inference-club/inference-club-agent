@@ -22,8 +22,6 @@ services:
   postgres:
     container_name: postgres
     image: postgres:17.2
-    networks:
-      - main
     ports:
       - "5432:5432"
     volumes:
@@ -31,6 +29,8 @@ services:
     environment:
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_HOST_AUTH_METHOD=trust
+    networks:
+      - main
 
   pgadmin:
     container_name: pgadmin
@@ -44,15 +44,17 @@ services:
       - "5050:80"
     depends_on:
       - "postgres"
+    restart: unless-stopped
     networks:
       - main
-    restart: unless-stopped
 
   redis:
     image: redis:alpine
     volumes:
       - redis-data:/data
     container_name: redis
+    ports:
+      - "6379:6379"
     networks:
       - main
 
@@ -72,8 +74,6 @@ services:
       - "8000:8000"
     networks:
       - main
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       - CELERY_TASK_ALWAYS_EAGER=${CELERY_TASK_ALWAYS_EAGER:-0}
       - DJANGO_EMAIL_HOST=mailhog
@@ -151,14 +151,14 @@ services:
     image: mher/flower
     ports:
       - "5555:5555"
-    networks:
-      - main
     depends_on:
       celery_worker:
         condition: service_healthy
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/1
       - TZ=America/New_York
+    networks:
+      - main
 
 networks:
   main:

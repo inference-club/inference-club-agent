@@ -200,10 +200,12 @@ components:
       enum:
       - llm_chat
       - llm_completion
+      - image_generation
       type: string
       description: |-
         * `llm_chat` - LLM Chat
         * `llm_completion` - LLM Completion
+        * `image_generation` - Image Generation
     PatchedInferenceRequest:
       type: object
       properties:
