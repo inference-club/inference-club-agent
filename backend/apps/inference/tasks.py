@@ -10,14 +10,14 @@ from .models import InferenceRequest
 logger = logging.getLogger(__name__)
 
 OPENAI_COMPATIBLE_API_URL = "http:/0.0.0.0:11434/v1"
-NIM_FLUX_API_URL = "http://192.168.5.173:8001/api/v1"
+NIM_FLUX_API_URL = "http://host.docker.internal:8001/v1"
 
 
 def handle_image_generation(inference_request):
     """Handle image generation using the Flux API."""
     try:
         # Prepare the request to Flux API
-        endpoint = f"{NIM_FLUX_API_URL}/v1/infer"
+        endpoint = f"{NIM_FLUX_API_URL}/infer"
         logger.info(
             f"Sending request to Flux API with payload: {inference_request.payload}"
         )

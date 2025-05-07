@@ -58,18 +58,45 @@ class InferenceRequestAdminForm(forms.ModelForm):
 @admin.register(InferenceRequest)
 class InferenceRequestAdmin(admin.ModelAdmin):
     form = InferenceRequestAdminForm
-    list_display = ("id", "inference_type", "status", "created_at", "updated_at")
+    list_display = (
+        "id",
+        "inference_type",
+        "status",
+        "created_at",
+        "updated_at",
+        "display_image",
+    )
     list_filter = ("inference_type", "status")
     search_fields = ("id", "inference_type", "status")
-    readonly_fields = ("created_at", "updated_at")
+    readonly_fields = ("created_at", "updated_at", "display_image")
     fieldsets = (
         (
             "Request Information",
             {"fields": ("inference_type", "status", "formatted_payload")},
         ),
-        ("Response Information", {"fields": ("formatted_response", "error_details")}),
+        (
+            "Response Information",
+            {
+                "fields": (
+                    "formatted_response",
+                    "error_details",
+                    "generated_image",
+                    "display_image",
+                )
+            },
+        ),
         ("Timestamps", {"fields": ("created_at", "updated_at")}),
     )
+
+    def display_image(self, obj):
+        if obj.generated_image:
+            return format_html(
+                '<img src="{}" width="150" height="150" style="object-fit: contain;" />',
+                obj.generated_image.url,
+            )
+        return "No image generated"
+
+    display_image.short_description = "Generated Image"
 
     def get_fieldsets(self, request, obj=None):
         fieldsets = super().get_fieldsets(request, obj)

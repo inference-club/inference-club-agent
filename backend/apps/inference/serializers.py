@@ -12,6 +12,7 @@ class InferenceRequestSerializer(serializers.ModelSerializer):
             "status",
             "response",
             "error_details",
+            "generated_image",
             "created_at",
             "updated_at",
         ]
@@ -20,6 +21,7 @@ class InferenceRequestSerializer(serializers.ModelSerializer):
             "status",
             "response",
             "error_details",
+            "generated_image",
             "created_at",
             "updated_at",
         ]

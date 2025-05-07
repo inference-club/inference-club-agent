@@ -16,6 +16,7 @@ import requests
 import json
 import time
 import logging
+import random
 
 # Configure logging
 logging.basicConfig(
@@ -30,18 +31,23 @@ def test_flux_image_generation():
     # API endpoint
     url = "http://localhost:8000/api/inference/"
     logger.info(f"Using API endpoint: {url}")
+    seed = random.randint(1, 2147483647)
 
+    # seed = 2198893635
+
+    prompt = 'A small neon light sign that says "Inference Club" in bold large letters all caps. Theme is Generative AI with text images videos 3d models voice music, etc'
+    prompt = 'a cartoon of two little girls in dresses walking to school. One of the girls says: "another day at school" comic strip in the style of li\'l abner 1940s printed cartoon'
     # Request payload
     payload = {
         "inference_type": "image_generation",
         "payload": {
-            "prompt": "A cute dog cartoon",
+            "prompt": prompt,
             "height": 1024,
             "width": 1024,
-            "cfg_scale": 5,
+            "cfg_scale": 6,
             "mode": "base",
             "samples": 1,
-            "seed": 0,
+            "seed": seed,
             "steps": 50,
         },
     }
