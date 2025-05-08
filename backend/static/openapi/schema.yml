@@ -179,6 +179,11 @@ components:
           type: string
           readOnly: true
           nullable: true
+        generated_image:
+          type: string
+          format: uri
+          readOnly: true
+          nullable: true
         created_at:
           type: string
           format: date-time
@@ -190,6 +195,7 @@ components:
       required:
       - created_at
       - error_details
+      - generated_image
       - id
       - inference_type
       - payload
@@ -224,6 +230,11 @@ components:
           nullable: true
         error_details:
           type: string
+          readOnly: true
+          nullable: true
+        generated_image:
+          type: string
+          format: uri
           readOnly: true
           nullable: true
         created_at:
