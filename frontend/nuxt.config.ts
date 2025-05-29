@@ -9,17 +9,37 @@ export default defineNuxtConfig({
       tailwindcss(),
     ],
   },
-
+  devServer: {
+    port: 8081,
+    host: '0.0.0.0'
+  },
+  runtimeConfig: {
+    public: {
+      apiBase: 'http://localhost:8000',
+    }
+  },
+  // content: {
+  //   wsUrl: 'ws://0.0.0.0:4000/ws',
+  //   experimental: {
+  //     clientDB: true,
+  //     stripQueryParameters: true
+  //   }
+  // },
   modules: [
-    '@nuxt/content',
+    // '@nuxt/content',
     '@nuxt/eslint',
     '@nuxt/fonts',
     '@nuxt/icon',
     '@nuxt/image',
     '@nuxt/scripts',
     '@nuxt/test-utils',
-    'shadcn-nuxt'
+    '@nuxtjs/color-mode',
+    'shadcn-nuxt',
   ],
+  colorMode: {
+    classSuffix: '',
+    storageKey: 'theme',
+  },
   shadcn: {
     /**
      * Prefix for all the imported component

@@ -142,3 +142,73 @@ def process_inference_request(request_id):
             inference_request.status = "failed"
             inference_request.error_details = f"Unexpected error: {str(e)}"
             inference_request.save()
+
+
+@app.task
+def process_image_gen_inference_request(request_id):
+    try:
+        logger.info("🟢 [Celery] Starting process_image_gen_inference_request for ID %s", request_id)
+        inference_request = InferenceRequest.objects.get(id=request_id)
+        logger.info("🔍 [Celery] Loaded InferenceRequest %s", request_id)
+        inference_request.status = "in_progress"
+        inference_request.save()
+
+        service = inference_request.image_gen_service
+        if not service:
+            logger.error("❌ [Celery] No image generation service associated with request %s", request_id)
+            inference_request.status = "failed"
+            inference_request.error_details = "No image generation service associated with this request."
+            inference_request.save()
+            return
+
+        # Only support FLUX_NIM for now
+        if service.service_type != "FLUX_NIM":
+            logger.error("❌ [Celery] Service type %s not supported for request %s", service.service_type, request_id)
+            inference_request.status = "failed"
+            inference_request.error_details = f"Service type {service.service_type} not supported yet."
+            inference_request.save()
+            return
+
+        # Always use /v1/infer path for Flux Nim
+        if service.base_url.endswith('/'):
+            endpoint = service.base_url.rstrip('/') + '/v1/infer'
+        else:
+            endpoint = service.base_url + '/v1/infer'
+        payload = dict(inference_request.payload)
+        payload.pop('ratio', None)  # Remove ratio if present
+        logger.info("🌐 [Celery] Sending request to Flux Nim at %s with payload: %s", endpoint, payload)
+        response = requests.post(
+            endpoint,
+            json=payload,
+            headers={"Content-Type": "application/json", "accept": "application/json"},
+        )
+        logger.info("📬 [Celery] Received response from Flux Nim: %s", response.status_code)
+        if response.status_code == 200:
+            response_data = response.json()
+            image_b64 = response_data["artifacts"][0]["base64"]
+            image_data = base64.b64decode(image_b64)
+            image = Image.open(BytesIO(image_data))
+            image_io = BytesIO()
+            image.save(image_io, format="PNG")
+            image_io.seek(0)
+            inference_request.generated_image.save(
+                f"generated_image_{inference_request.id}.png",
+                ContentFile(image_io.getvalue()),
+                save=False,
+            )
+            inference_request.response = response_data
+            inference_request.status = "completed"
+            logger.info("✅ [Celery] Successfully processed image gen request %s", request_id)
+        else:
+            inference_request.status = "failed"
+            error_msg = f"Flux Nim API request failed: {response.status_code} {response.text}"
+            inference_request.error_details = error_msg
+            logger.error("❌ [Celery] %s", error_msg)
+        inference_request.save()
+    except Exception as e:
+        logger.error(f"🔥 [Celery] Error in process_image_gen_inference_request for request {request_id}: {str(e)}")
+        if 'inference_request' in locals():
+            inference_request.status = "failed"
+            inference_request.error_details = f"Image generation error: {str(e)}"
+            inference_request.save()
+        return False

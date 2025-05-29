@@ -1,5 +1,6 @@
 from django.db import models
 from django.utils import timezone
+from apps.services.models import ImageGenModel
 
 # Create your models here.
 
@@ -27,6 +28,9 @@ class InferenceRequest(models.Model):
     error_details = models.TextField(null=True, blank=True)
     generated_image = models.ImageField(
         upload_to="generated_images/", null=True, blank=True
+    )
+    image_gen_service = models.ForeignKey(
+        ImageGenModel, null=True, blank=True, on_delete=models.SET_NULL, related_name='inference_requests'
     )
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)

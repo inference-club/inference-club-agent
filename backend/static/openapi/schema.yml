@@ -157,8 +157,407 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/services/image-gen-infer/:
+    post:
+      operationId: services_image_gen_infer_create
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
+  /api/services/image-gen-models/:
+    get:
+      operationId: services_image_gen_models_list
+      description: API endpoint for managing image generation models.
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ImageGenModel'
+          description: ''
+    post:
+      operationId: services_image_gen_models_create
+      description: API endpoint for managing image generation models.
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImageGenModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ImageGenModel'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ImageGenModel'
+        required: true
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageGenModel'
+          description: ''
+  /api/services/image-gen-models/{slug}/:
+    get:
+      operationId: services_image_gen_models_retrieve
+      description: API endpoint for managing image generation models.
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+          description: URL-friendly identifier for the service
+        required: true
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageGenModel'
+          description: ''
+    put:
+      operationId: services_image_gen_models_update
+      description: API endpoint for managing image generation models.
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+          description: URL-friendly identifier for the service
+        required: true
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImageGenModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ImageGenModel'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ImageGenModel'
+        required: true
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageGenModel'
+          description: ''
+    patch:
+      operationId: services_image_gen_models_partial_update
+      description: API endpoint for managing image generation models.
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+          description: URL-friendly identifier for the service
+        required: true
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedImageGenModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedImageGenModel'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedImageGenModel'
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageGenModel'
+          description: ''
+    delete:
+      operationId: services_image_gen_models_destroy
+      description: API endpoint for managing image generation models.
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+          description: URL-friendly identifier for the service
+        required: true
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
+  /api/services/image-gen-models/{slug}/requests/:
+    get:
+      operationId: services_image_gen_models_requests_retrieve
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+        required: true
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
+  /api/services/llm-models/:
+    get:
+      operationId: services_llm_models_list
+      description: API endpoint for managing LLM models.
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LLMModel'
+          description: ''
+    post:
+      operationId: services_llm_models_create
+      description: API endpoint for managing LLM models.
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LLMModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LLMModel'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/LLMModel'
+        required: true
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMModel'
+          description: ''
+  /api/services/llm-models/{slug}/:
+    get:
+      operationId: services_llm_models_retrieve
+      description: API endpoint for managing LLM models.
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+          description: URL-friendly version of the name
+        required: true
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMModel'
+          description: ''
+    put:
+      operationId: services_llm_models_update
+      description: API endpoint for managing LLM models.
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+          description: URL-friendly version of the name
+        required: true
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LLMModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LLMModel'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/LLMModel'
+        required: true
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMModel'
+          description: ''
+    patch:
+      operationId: services_llm_models_partial_update
+      description: API endpoint for managing LLM models.
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+          description: URL-friendly version of the name
+        required: true
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedLLMModel'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedLLMModel'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedLLMModel'
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMModel'
+          description: ''
+    delete:
+      operationId: services_llm_models_destroy
+      description: API endpoint for managing LLM models.
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+          description: URL-friendly version of the name
+        required: true
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
 components:
   schemas:
+    ImageGenModel:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          description: Name of the image generation service
+          maxLength: 255
+        slug:
+          type: string
+          description: URL-friendly identifier for the service
+          maxLength: 255
+          pattern: ^[-a-zA-Z0-9_]+$
+        base_url:
+          type: string
+          format: uri
+          description: Base URL for the image generation API
+          maxLength: 200
+        service_type:
+          allOf:
+          - $ref: '#/components/schemas/ServiceTypeEnum'
+          description: |-
+            Type of image generation service
+
+            * `FLUX_NIM` - Flux Nim
+            * `INVOKEAI` - InvokeAI
+            * `COMFYUI` - ComfyUI
+        service_type_display:
+          type: string
+          readOnly: true
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - base_url
+      - created_at
+      - id
+      - name
+      - service_type
+      - service_type_display
+      - slug
+      - updated_at
     InferenceRequest:
       type: object
       properties:
@@ -181,9 +580,7 @@ components:
           nullable: true
         generated_image:
           type: string
-          format: uri
           readOnly: true
-          nullable: true
         created_at:
           type: string
           format: date-time
@@ -212,6 +609,85 @@ components:
         * `llm_chat` - LLM Chat
         * `llm_completion` - LLM Completion
         * `image_generation` - Image Generation
+    LLMModel:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          description: Name of the LLM model (e.g. qwen3-8b)
+          maxLength: 255
+        slug:
+          type: string
+          readOnly: true
+          description: URL-friendly version of the name
+          pattern: ^[-a-zA-Z0-9_]+$
+        base_url:
+          type: string
+          format: uri
+          description: Base URL for the LLM API (e.g. http://localhost:1234/v1)
+          maxLength: 200
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - base_url
+      - created_at
+      - id
+      - name
+      - slug
+      - updated_at
+    PatchedImageGenModel:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          description: Name of the image generation service
+          maxLength: 255
+        slug:
+          type: string
+          description: URL-friendly identifier for the service
+          maxLength: 255
+          pattern: ^[-a-zA-Z0-9_]+$
+        base_url:
+          type: string
+          format: uri
+          description: Base URL for the image generation API
+          maxLength: 200
+        service_type:
+          allOf:
+          - $ref: '#/components/schemas/ServiceTypeEnum'
+          description: |-
+            Type of image generation service
+
+            * `FLUX_NIM` - Flux Nim
+            * `INVOKEAI` - InvokeAI
+            * `COMFYUI` - ComfyUI
+        service_type_display:
+          type: string
+          readOnly: true
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
     PatchedInferenceRequest:
       type: object
       properties:
@@ -234,9 +710,7 @@ components:
           nullable: true
         generated_image:
           type: string
-          format: uri
           readOnly: true
-          nullable: true
         created_at:
           type: string
           format: date-time
@@ -245,6 +719,46 @@ components:
           type: string
           format: date-time
           readOnly: true
+    PatchedLLMModel:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          description: Name of the LLM model (e.g. qwen3-8b)
+          maxLength: 255
+        slug:
+          type: string
+          readOnly: true
+          description: URL-friendly version of the name
+          pattern: ^[-a-zA-Z0-9_]+$
+        base_url:
+          type: string
+          format: uri
+          description: Base URL for the LLM API (e.g. http://localhost:1234/v1)
+          maxLength: 200
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+    ServiceTypeEnum:
+      enum:
+      - FLUX_NIM
+      - INVOKEAI
+      - COMFYUI
+      type: string
+      description: |-
+        * `FLUX_NIM` - Flux Nim
+        * `INVOKEAI` - InvokeAI
+        * `COMFYUI` - ComfyUI
     StatusEnum:
       enum:
       - requested
