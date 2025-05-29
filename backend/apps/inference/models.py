@@ -32,6 +32,7 @@ class InferenceRequest(models.Model):
     image_gen_service = models.ForeignKey(
         ImageGenModel, null=True, blank=True, on_delete=models.SET_NULL, related_name='inference_requests'
     )
+    input_image = models.TextField(null=True, blank=True, help_text="Optional input image (data URL) for canny/depth modes.")
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 

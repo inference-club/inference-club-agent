@@ -56,11 +56,13 @@ def image_gen_infer(request):
     service = get_object_or_404(ImageGenModel, slug=slug)
     payload = request.data.copy()
     payload.pop('service_slug', None)
+    input_image = payload.pop('image', None)
     inference_request = InferenceRequest.objects.create(
         inference_type='image_generation',
         payload=payload,
         image_gen_service=service,
         status='requested',
+        input_image=input_image,
     )
     logger.info("📝 Created InferenceRequest ID %s for service '%s'", inference_request.id, slug)
     # Trigger Celery task

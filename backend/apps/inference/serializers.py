@@ -4,6 +4,7 @@ from .models import InferenceRequest
 
 class InferenceRequestSerializer(serializers.ModelSerializer):
     generated_image = serializers.SerializerMethodField()
+    input_image = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
     class Meta:
         model = InferenceRequest
@@ -15,6 +16,7 @@ class InferenceRequestSerializer(serializers.ModelSerializer):
             "response",
             "error_details",
             "generated_image",
+            "input_image",
             "created_at",
             "updated_at",
         ]

@@ -6,6 +6,7 @@ from PIL import Image
 from django.core.files.base import ContentFile
 from backend.celery_app import app
 from .models import InferenceRequest
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +177,16 @@ def process_image_gen_inference_request(request_id):
             endpoint = service.base_url + '/v1/infer'
         payload = dict(inference_request.payload)
         payload.pop('ratio', None)  # Remove ratio if present
-        logger.info("🌐 [Celery] Sending request to Flux Nim at %s with payload: %s", endpoint, payload)
+        # If mode is canny or depth and input_image is present, add it to the payload as 'image'
+        mode = payload.get('mode')
+        if mode in ('canny', 'depth') and inference_request.input_image:
+            payload['image'] = inference_request.input_image
+            # Flux Nim only accepts 'base' mode, but we'll keep the original mode in our payload
+            # payload['mode'] = 'base'
+            payload["preprocess_image"] = False
+        # Log the full payload in a readable format
+        logger.info("🌐 [Celery] Sending request to Flux Nim at %s", endpoint)
+        logger.info("📦 [Celery] Full payload:\n%s", json.dumps(payload, indent=2))
         response = requests.post(
             endpoint,
             json=payload,

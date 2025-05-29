@@ -65,14 +65,15 @@ class InferenceRequestAdmin(admin.ModelAdmin):
         "created_at",
         "updated_at",
         "display_image",
+        "short_input_image",
     )
     list_filter = ("inference_type", "status")
     search_fields = ("id", "inference_type", "status")
-    readonly_fields = ("created_at", "updated_at", "display_image")
+    readonly_fields = ("created_at", "updated_at", "display_image", "input_image")
     fieldsets = (
         (
             "Request Information",
-            {"fields": ("inference_type", "status", "formatted_payload")},
+            {"fields": ("inference_type", "status", "formatted_payload", "input_image")},
         ),
         (
             "Response Information",
@@ -97,6 +98,13 @@ class InferenceRequestAdmin(admin.ModelAdmin):
         return "No image generated"
 
     display_image.short_description = "Generated Image"
+
+    def short_input_image(self, obj):
+        if obj.input_image:
+            return f"{obj.input_image[:40]}..." if len(obj.input_image) > 40 else obj.input_image
+        return ""
+
+    short_input_image.short_description = "Input Image (data URL)"
 
     def get_fieldsets(self, request, obj=None):
         fieldsets = super().get_fieldsets(request, obj)

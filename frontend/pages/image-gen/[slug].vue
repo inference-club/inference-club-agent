@@ -33,11 +33,14 @@
                     <SelectValue placeholder="Select mode" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="base">Base</SelectItem>
-                    <SelectItem value="canny">Canny</SelectItem>
-                    <SelectItem value="depth">Depth</SelectItem>
+                    <SelectItem value="base">Base (Text to Image)</SelectItem>
+                    <SelectItem value="canny">Canny (Edge Detection)</SelectItem>
+                    <SelectItem value="depth">Depth (Depth Map)</SelectItem>
                   </SelectContent>
                 </Select>
+                <p class="text-sm text-muted-foreground mt-1">
+                  Note: For Canny and Depth modes, you'll need to provide an input image.
+                </p>
               </div>
               <div class="space-y-2">
                 <Label for="prompt">Prompt</Label>
@@ -75,6 +78,14 @@
               <div class="space-y-2">
                 <Label for="seed">Seed</Label>
                 <Input id="seed" v-model.number="form.seed" type="number" placeholder="0 (random)" />
+              </div>
+              <div v-if="form.mode === 'canny' || form.mode === 'depth'" class="space-y-2">
+                <Label for="input-image">Input Image (optional)</Label>
+                <input id="input-image" type="file" accept="image/*" class="block w-full text-sm text-muted-foreground file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-primary/10 file:text-primary hover:file:bg-primary/20" @change="handleImageUpload" >
+                <div v-if="form.image" class="mt-2">
+                  <img :src="form.image" alt="Input preview" class="max-h-40 rounded border" >
+                  <Button variant="ghost" size="sm" class="mt-1" @click="removeImage">Remove</Button>
+                </div>
               </div>
               <div class="flex justify-end">
                 <Button type="submit" :disabled="isSubmitting">
@@ -147,6 +158,7 @@ const form = ref({
   cfg_scale: 3.5,
   steps: 50,
   seed: 0,
+  image: null,
 })
 const ratioMap = {
   '1:1': { width: 1024, height: 1024 },
@@ -167,6 +179,7 @@ const handleSubmit = async () => {
       width,
       height,
       service_slug: route.params.slug,
+      image: (form.value.mode === 'canny' || form.value.mode === 'depth') ? form.value.image : null,
     }
     const response = await fetch(`${apiBase}/api/services/image-gen-infer/`, {
       method: 'POST',
@@ -175,6 +188,7 @@ const handleSubmit = async () => {
     })
     if (!response.ok) throw new Error('Failed to submit request')
     await fetchRequests()
+    form.value.image = null
   } catch (e) {
     formError.value = e.message
   } finally {
@@ -211,6 +225,18 @@ const getImageUrl = (path) => {
   if (path.startsWith('http')) return path
   if (path.startsWith('/media/')) return `${apiBase}${path}`
   return `${apiBase}/media/${path}`
+}
+const handleImageUpload = (e) => {
+  const file = e.target.files[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = (event) => {
+    form.value.image = event.target.result
+  }
+  reader.readAsDataURL(file)
+}
+const removeImage = () => {
+  form.value.image = null
 }
 onMounted(async () => {
   await fetchModel()
