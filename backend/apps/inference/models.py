@@ -1,6 +1,6 @@
 from django.db import models
 from django.utils import timezone
-from apps.services.models import ImageGenModel
+from apps.services.models import ImageGenModel, TTSService
 
 # Create your models here.
 
@@ -33,6 +33,9 @@ class InferenceRequest(models.Model):
         ImageGenModel, null=True, blank=True, on_delete=models.SET_NULL, related_name='inference_requests'
     )
     input_image = models.TextField(null=True, blank=True, help_text="Optional input image (data URL) for canny/depth modes.")
+    tts_service = models.ForeignKey(TTSService, null=True, blank=True, on_delete=models.SET_NULL, related_name='inference_requests')
+    speech_output = models.FileField(upload_to='tts_outputs/', null=True, blank=True)
+    speech_input = models.FileField(upload_to='tts_inputs/', null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 

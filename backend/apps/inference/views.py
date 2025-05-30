@@ -12,6 +12,16 @@ class InferenceRequestViewSet(viewsets.ModelViewSet):
     queryset = InferenceRequest.objects.all()
     serializer_class = InferenceRequestSerializer
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        tts_service_id = self.request.query_params.get('tts_service')
+        image_gen_service_id = self.request.query_params.get('image_gen_service')
+        if tts_service_id:
+            queryset = queryset.filter(tts_service_id=tts_service_id)
+        if image_gen_service_id:
+            queryset = queryset.filter(image_gen_service_id=image_gen_service_id)
+        return queryset
+
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)

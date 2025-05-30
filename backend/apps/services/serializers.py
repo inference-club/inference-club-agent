@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import LLMModel, ImageGenModel
+from .models import LLMModel, ImageGenModel, TTSService
 
 class LLMModelSerializer(serializers.ModelSerializer):
     class Meta:
@@ -15,3 +15,9 @@ class ImageGenModelSerializer(serializers.ModelSerializer):
         model = ImageGenModel
         fields = ['id', 'name', 'slug', 'base_url', 'service_type', 'service_type_display', 'is_active', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class TTSServiceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TTSService
+        fields = ['id', 'slug', 'url', 'type']

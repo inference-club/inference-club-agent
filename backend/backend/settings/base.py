@@ -117,10 +117,10 @@ CELERY_RESULT_SERIALIZER = "json"
 CELERY_TASK_DEFAULT_QUEUE = "default"
 
 CELERY_BEAT_SCHEDULE = {
-    "celery-beat-debug-task": {
-        "task": "apps.core.tasks.celery_beat_debug_task",
-        "schedule": 10,
-    },
+    # "celery-beat-debug-task": {
+    #     "task": "apps.core.tasks.celery_beat_debug_task",
+    #     "schedule": 10,
+    # },
 }
 
 CELERY_TASK_ALWAYS_EAGER = bool(int(os.environ.get("CELERY_TASK_ALWAYS_EAGER", 0)))

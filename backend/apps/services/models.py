@@ -47,3 +47,18 @@ class ImageGenModel(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.get_service_type_display()})"
+
+
+class TTSService(models.Model):
+    DIA = 'Dia'
+    CHAT_TTS = 'ChatTTS'
+    TYPE_CHOICES = [
+        (DIA, 'Dia'),
+        (CHAT_TTS, 'ChatTTS'),
+    ]
+    slug = models.SlugField(unique=True)
+    url = models.URLField()
+    type = models.CharField(max_length=16, choices=TYPE_CHOICES)
+
+    def __str__(self):
+        return f"{self.slug} ({self.type})"

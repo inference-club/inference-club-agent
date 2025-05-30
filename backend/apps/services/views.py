@@ -3,11 +3,12 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-from .models import LLMModel, ImageGenModel
-from .serializers import LLMModelSerializer, ImageGenModelSerializer
+from .models import LLMModel, ImageGenModel, TTSService
+from .serializers import LLMModelSerializer, ImageGenModelSerializer, TTSServiceSerializer
 from apps.inference.models import InferenceRequest
 from apps.inference.serializers import InferenceRequestSerializer
-from apps.inference.tasks import process_image_gen_inference_request
+from apps.inference.tasks import process_image_gen_inference_request, process_tts_inference_request
+from django.core.files.uploadedfile import InMemoryUploadedFile, TemporaryUploadedFile
 import logging
 
 logger = logging.getLogger(__name__)
@@ -83,3 +84,57 @@ def list_inference_requests_for_service(request, slug):
     serializer = InferenceRequestSerializer(requests, many=True)
     logger.info("📦 Found %d requests for service '%s'", len(requests), slug)
     return Response(serializer.data)
+
+
+class TTSServiceViewSet(viewsets.ModelViewSet):
+    queryset = TTSService.objects.all()
+    serializer_class = TTSServiceSerializer
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def tts_infer(request):
+    """
+    Accepts a TTS inference request (multipart/form-data), creates an InferenceRequest, and triggers the Celery task.
+    """
+    try:
+        tts_service_id = request.data.get('tts_service')
+        tts_service = TTSService.objects.get(id=tts_service_id)
+        text_input = request.data.get('text_input', '')
+        max_new_tokens = int(request.data.get('max_new_tokens', 860))
+        cfg_scale = float(request.data.get('cfg_scale', 1))
+        temperature = float(request.data.get('temperature', 1))
+        top_p = float(request.data.get('top_p', 0.8))
+        cfg_filter_top_k = int(request.data.get('cfg_filter_top_k', 15))
+        speed_factor = float(request.data.get('speed_factor', 0.8))
+        audio_prompt_input = request.FILES.get('audio_prompt_input')
+
+        payload = {
+            'text_input': text_input,
+            'max_new_tokens': max_new_tokens,
+            'cfg_scale': cfg_scale,
+            'temperature': temperature,
+            'top_p': top_p,
+            'cfg_filter_top_k': cfg_filter_top_k,
+            'speed_factor': speed_factor
+        }
+
+        inference_request = InferenceRequest.objects.create(
+            inference_type='tts',
+            payload=payload,
+            tts_service=tts_service,
+            status='requested',
+        )
+        if audio_prompt_input:
+            inference_request.speech_input.save(audio_prompt_input.name, audio_prompt_input, save=True)
+
+        logger.info(f"📝 Created TTS InferenceRequest ID {inference_request.id} for service '{tts_service.slug}'")
+        process_tts_inference_request.delay(inference_request.id)
+        logger.info(f"📤 Dispatched Celery task for TTS InferenceRequest ID {inference_request.id}")
+        return Response({
+            'request_id': inference_request.id,
+            'status': inference_request.status
+        }, status=status.HTTP_201_CREATED)
+    except Exception as e:
+        logger.error(f"❌ Error in tts_infer: {str(e)}")
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

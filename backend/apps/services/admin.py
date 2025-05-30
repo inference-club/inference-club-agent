@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import LLMModel, ImageGenModel
+from .models import LLMModel, ImageGenModel, TTSService
 
 @admin.register(LLMModel)
 class LLMModelAdmin(admin.ModelAdmin):
@@ -16,3 +16,5 @@ class ImageGenModelAdmin(admin.ModelAdmin):
     list_filter = ('service_type', 'is_active', 'created_at')
     search_fields = ('name', 'slug', 'base_url')
     ordering = ('-created_at',)
+
+admin.site.register(TTSService)

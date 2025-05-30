@@ -7,6 +7,9 @@ from django.core.files.base import ContentFile
 from backend.celery_app import app
 from .models import InferenceRequest
 import json
+from celery import shared_task
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -222,3 +225,158 @@ def process_image_gen_inference_request(request_id):
             inference_request.error_details = f"Image generation error: {str(e)}"
             inference_request.save()
         return False
+
+
+@app.task
+def process_tts_inference_request(request_id):
+    try:
+        inference_request = InferenceRequest.objects.get(id=request_id)
+        inference_request.status = "in_progress"
+        inference_request.save()
+
+        payload = inference_request.payload or {}
+        text_input = payload.get("text_input", "")
+        max_new_tokens = payload.get("max_new_tokens", 860)
+        cfg_scale = payload.get("cfg_scale", 1)
+        temperature = payload.get("temperature", 1)
+        top_p = payload.get("top_p", 0.8)
+        cfg_filter_top_k = payload.get("cfg_filter_top_k", 15)
+        speed_factor = payload.get("speed_factor", 0.8)
+        audio_prompt_input = None
+        uploaded_file_path = None
+
+        # Get the TTS service URL from the related service
+        tts_service = inference_request.tts_service
+        if not tts_service or not tts_service.url:
+            logger.error("❌ No TTS service or URL associated with this request.")
+            inference_request.status = "failed"
+            inference_request.error_details = "No TTS service or URL associated with this request."
+            inference_request.save()
+            return
+        base_url = tts_service.url.rstrip('/')
+        upload_url = f"{base_url}/gradio_api/upload"
+        generate_url = f"{base_url}/gradio_api/call/generate_audio"
+        poll_url = lambda event_id: f"{base_url}/gradio_api/call/generate_audio/{event_id}"
+
+        # If there is a conditioning audio file, upload it first
+        if inference_request.speech_input:
+            logger.info(f"📂 Uploading audio file: {inference_request.speech_input.path}")
+            with inference_request.speech_input.open('rb') as audio_file:
+                files = {
+                    'files': (os.path.basename(inference_request.speech_input.name), audio_file, 'audio/wav')
+                }
+                upload_response = requests.post(
+                    upload_url,
+                    files=files
+                )
+                if upload_response.status_code != 200:
+                    logger.error(f"❌ Failed to upload audio file. Status code: {upload_response.status_code}")
+                    inference_request.status = "failed"
+                    inference_request.error_details = f"Failed to upload audio file: {upload_response.text}"
+                    inference_request.save()
+                    return
+                upload_data = upload_response.json()
+                if not isinstance(upload_data, list) or len(upload_data) == 0:
+                    logger.error("❌ Invalid response from upload endpoint")
+                    inference_request.status = "failed"
+                    inference_request.error_details = "Invalid upload response"
+                    inference_request.save()
+                    return
+                uploaded_file_path = upload_data[0]
+                logger.info(f"✅ Successfully uploaded audio file: {uploaded_file_path}")
+
+        # Prepare the data for the TTS generation request
+        data = [
+            text_input,
+            {
+                "path": uploaded_file_path,
+                "meta": {"_type": "gradio.FileData"}
+            } if uploaded_file_path else None,
+            max_new_tokens,
+            cfg_scale,
+            temperature,
+            top_p,
+            cfg_filter_top_k,
+            speed_factor
+        ]
+        # Always send 8 arguments; if no audio, the second argument is None
+        logger.info("📤 Sending TTS generation request...")
+        response = requests.post(
+            generate_url,
+            headers={"Content-Type": "application/json"},
+            json={"data": data}
+        )
+        logger.info(f"📥 Received response with status code: {response.status_code}")
+        response_data = response.json()
+        logger.info(f"📦 Response data: {json.dumps(response_data, indent=2)}")
+        if "event_id" not in response_data:
+            logger.error("❌ Response does not contain 'event_id' key.")
+            inference_request.status = "failed"
+            inference_request.error_details = f"No event_id in response: {response_data}"
+            inference_request.save()
+            return
+        event_id = response_data["event_id"]
+        logger.info(f"✅ Successfully received event ID: {event_id}")
+
+        # Poll for the result
+        logger.info("🎵 Requesting audio data...")
+        audio_url = None
+        audio_response = requests.get(
+            poll_url(event_id),
+            stream=True
+        )
+        if audio_response.status_code == 200:
+            for line in audio_response.iter_lines():
+                if line:
+                    line = line.decode('utf-8')
+                    logger.info(f"📝 Received event: {line}")
+                    if line.startswith('data: '):
+                        try:
+                            data = json.loads(line[6:])
+                            if isinstance(data, list) and len(data) > 0:
+                                audio_data = data[0]
+                                if isinstance(audio_data, dict) and 'url' in audio_data:
+                                    audio_url = audio_data['url']
+                                    logger.info(f"🎵 Found audio URL: {audio_url}")
+                                    break
+                        except json.JSONDecodeError:
+                            continue
+            if audio_url:
+                logger.info(f"📥 Downloading audio from: {audio_url}")
+                audio_file_response = requests.get(audio_url)
+                if audio_file_response.status_code == 200:
+                    filename = f"tts_output_{inference_request.id}.wav"
+                    inference_request.speech_output.save(
+                        filename,
+                        ContentFile(audio_file_response.content),
+                        save=False
+                    )
+                    inference_request.status = "completed"
+                    inference_request.save()
+                    logger.info(f"✨ Successfully saved audio to {filename}")
+                    return
+                else:
+                    logger.error(f"❌ Failed to download audio file. Status code: {audio_file_response.status_code}")
+                    inference_request.status = "failed"
+                    inference_request.error_details = f"Failed to download audio file: {audio_file_response.text}"
+                    inference_request.save()
+                    return
+            else:
+                logger.error("❌ Could not find audio URL in the response")
+                inference_request.status = "failed"
+                inference_request.error_details = "Could not find audio URL in the response"
+                inference_request.save()
+                return
+        else:
+            logger.error(f"❌ Failed to get audio data. Status code: {audio_response.status_code}")
+            inference_request.status = "failed"
+            inference_request.error_details = f"Failed to get audio data: {audio_response.text}"
+            inference_request.save()
+            return
+    except Exception as e:
+        logger.error(f"❌ Error in process_tts_inference_request: {str(e)}")
+        if 'inference_request' in locals():
+            inference_request.status = "failed"
+            inference_request.error_details = str(e)
+            inference_request.save()
+        return
