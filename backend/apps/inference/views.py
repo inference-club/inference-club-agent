@@ -11,7 +11,9 @@ from langchain_openai import ChatOpenAI, OpenAI
 from langchain.callbacks.manager import CallbackManager
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 import logging
-from django.http import Http404
+from django.http import Http404, StreamingHttpResponse
+import requests
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,7 @@ class InferenceRequestViewSet(viewsets.ModelViewSet):
 def llm_inference(request):
     """
     Handle LLM inference requests in OpenAI API format.
-    Supports both chat completions and text completions.
+    Supports both chat completions and text completions, including streaming.
     """
     logger.info("🚀 Starting LLM inference request")
     logger.debug(f"📦 Request data: {request.data}")
@@ -83,118 +85,87 @@ def llm_inference(request):
         logger.error(f"❌ Failed to create inference request: {str(e)}")
         raise
 
+    # Determine endpoint based on request body
+    if "messages" in request.data:
+        endpoint = llm_service.base_url.rstrip('/') + '/chat/completions'
+    else:
+        endpoint = llm_service.base_url.rstrip('/') + '/completions'
+
+    headers = {
+        "Authorization": f"Bearer dummy-key",
+        "Content-Type": "application/json"
+    }
+
+    # Handle streaming
+    stream = request.data.get("stream", False)
     try:
-        # Configure the LLM client
-        if "messages" in request.data:
-            logger.info("💬 Processing chat completion request")
-            # Chat completion
-            try:
-                # Prepare LLM parameters
-                llm_params = {
-                    "base_url": llm_service.base_url,
-                    "api_key": "dummy-key",  # Using dummy key as specified
-                    "model": request.data.get("model", "Qwen/Qwen3-8B"),
-                    "temperature": request.data.get("temperature", 0.7),
-                }
-                # Only add max_tokens if it's provided and is a valid number
-                max_tokens = request.data.get("max_tokens")
-                if max_tokens is not None and isinstance(max_tokens, (int, float)):
-                    llm_params["max_tokens"] = int(max_tokens)
-
-                logger.debug(f"🤖 Configuring ChatOpenAI with params: {llm_params}")
-                llm = ChatOpenAI(**llm_params)
-
-                logger.info("🔄 Invoking LLM with messages")
-                response = llm.invoke(request.data["messages"])
-                logger.info("✅ Received response from LLM")
-
-                result = {
-                    "id": f"chatcmpl-{inference_request.id}",
-                    "object": "chat.completion",
-                    "created": inference_request.created_at.timestamp(),
-                    "model": request.data.get("model", "Qwen/Qwen3-8B"),
-                    "choices": [{
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": response.content
-                        },
-                        "finish_reason": "stop"
-                    }],
-                    "usage": {
-                        "prompt_tokens": 0,  # TODO: implement token counting
-                        "completion_tokens": 0,
-                        "total_tokens": 0
-                    }
-                }
-                logger.debug(f"📤 Prepared chat completion response: {result}")
-            except Exception as e:
-                logger.error(f"❌ Chat completion failed: {str(e)}")
-                raise
+        logger.info(f"🌐 Sending request to LLM API at {endpoint} (stream={stream})")
+        if stream:
+            # Stream the response from the LLM API to the client and accumulate it
+            api_response = requests.post(
+                endpoint,
+                json=request.data,
+                headers=headers,
+                stream=True,
+                timeout=120
+            )
+            api_response.raise_for_status()
+            streamed_chunks = []
+            def stream_generator():
+                try:
+                    for chunk in api_response.iter_content(chunk_size=8192):
+                        if chunk:
+                            streamed_chunks.append(chunk)
+                            yield chunk
+                    # After streaming is done, save the accumulated response
+                    full_data = b''.join(streamed_chunks).decode('utf-8')
+                    lines = [line.strip() for line in full_data.split('\n') if line.strip().startswith('data: ')]
+                    json_strs = [line.replace('data: ', '') for line in lines if line != 'data: [DONE]']
+                    parsed = []
+                    for js in json_strs:
+                        try:
+                            parsed.append(json.loads(js))
+                        except Exception:
+                            pass
+                    inference_request.response = parsed
+                    inference_request.status = "completed"
+                    inference_request.save()
+                    logger.info(f"✅ Saved streamed response for inference request {inference_request.id}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to save streamed response: {str(e)}")
+            response = StreamingHttpResponse(
+                stream_generator(),
+                content_type=api_response.headers.get('Content-Type', 'application/json')
+            )
+            response['Cache-Control'] = 'no-cache'
+            response['X-Accel-Buffering'] = 'no'
+            return response
         else:
-            logger.info("📝 Processing text completion request")
-            # Text completion
-            try:
-                # Prepare LLM parameters
-                llm_params = {
-                    "base_url": llm_service.base_url,
-                    "api_key": "dummy-key",  # Using dummy key as specified
-                    "model": request.data.get("model", "Qwen/Qwen3-8B"),
-                    "temperature": request.data.get("temperature", 0.7),
-                }
-                # Only add max_tokens if it's provided and is a valid number
-                max_tokens = request.data.get("max_tokens")
-                if max_tokens is not None and isinstance(max_tokens, (int, float)):
-                    llm_params["max_tokens"] = int(max_tokens)
-
-                logger.debug(f"🤖 Configuring OpenAI with params: {llm_params}")
-                llm = OpenAI(**llm_params)
-
-                logger.info("🔄 Invoking LLM with prompt")
-                response = llm.invoke(request.data["prompt"])
-                logger.info("✅ Received response from LLM")
-
-                result = {
-                    "id": f"cmpl-{inference_request.id}",
-                    "object": "text_completion",
-                    "created": inference_request.created_at.timestamp(),
-                    "model": request.data.get("model", "Qwen/Qwen3-8B"),
-                    "choices": [{
-                        "text": response,
-                        "index": 0,
-                        "finish_reason": "stop"
-                    }],
-                    "usage": {
-                        "prompt_tokens": 0,  # TODO: implement token counting
-                        "completion_tokens": 0,
-                        "total_tokens": 0
-                    }
-                }
-                logger.debug(f"📤 Prepared text completion response: {result}")
-            except Exception as e:
-                logger.error(f"❌ Text completion failed: {str(e)}")
-                raise
-
-        # Update inference request with response
-        try:
-            inference_request.response = result
-            inference_request.status = "completed"
-            inference_request.save()
-            logger.info(f"✅ Updated inference request {inference_request.id} with response")
-        except Exception as e:
-            logger.error(f"❌ Failed to update inference request: {str(e)}")
-            raise
-
-        logger.info("🎉 Successfully completed LLM inference request")
-        return Response(result)
-
-    except Exception as e:
-        logger.error(f"❌ LLM inference failed: {str(e)}")
+            # Non-streaming: return the full JSON response
+            api_response = requests.post(
+                endpoint,
+                json=request.data,
+                headers=headers,
+                timeout=60
+            )
+            api_response.raise_for_status()
+            result = api_response.json()
+    except requests.RequestException as e:
+        logger.error(f"❌ LLM API request failed: {str(e)}")
         inference_request.status = "failed"
         inference_request.error_details = str(e)
         inference_request.save()
-        logger.info(f"📝 Updated inference request {inference_request.id} with error details")
-        return Response(
-            {"error": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+    # Update inference request with response
+    try:
+        inference_request.response = result if not stream else None
+        inference_request.status = "completed"
+        inference_request.save()
+        logger.info(f"✅ Updated inference request {inference_request.id} with response")
+    except Exception as e:
+        logger.error(f"❌ Failed to update inference request: {str(e)}")
+        raise
+
+    logger.info("🎉 Successfully completed LLM inference request")
+    return Response(result)

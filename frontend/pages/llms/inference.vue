@@ -34,6 +34,10 @@
               </SelectContent>
             </Select>
           </div>
+          <div class="flex items-center gap-2">
+            <Label>Streaming</Label>
+            <Switch v-model="streaming" />
+          </div>
           <Button variant="outline" @click="showConfigModal = true">
             <Settings class="mr-2 h-4 w-4" />
             Settings
@@ -197,6 +201,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
+import { Switch } from '@/components/ui/switch'
 
 const runtimeConfig = useRuntimeConfig()
 const apiBase = runtimeConfig.public.apiBase
@@ -213,6 +218,7 @@ const modelConfig = ref({
   temperature: 0.7,
   max_tokens: null
 })
+const streaming = ref(false)
 
 // Fetch available models
 const fetchModels = async () => {
@@ -258,57 +264,190 @@ const canSubmitChat = computed(() => {
 // Submit completion request
 const submitCompletion = async () => {
   if (!selectedModel.value || !completionPrompt.value) return
-
-  try {
-    const response = await fetch(`${apiBase}/api/inference/llms/v1/`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: selectedModel.value.name,
-        prompt: completionPrompt.value,
-        ...modelConfig.value
-      }),
-    })
-
-    const data = await response.json()
-    completionResult.value = data.choices[0].text
-  } catch (error) {
-    console.error('Error submitting completion:', error)
+  completionResult.value = ''
+  if (streaming.value) {
+    // Streaming mode
+    try {
+      const response = await fetch(`${apiBase}/api/inference/llms/v1/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: selectedModel.value.name,
+          prompt: completionPrompt.value,
+          ...modelConfig.value,
+          stream: true
+        }),
+      })
+      if (!response.body) throw new Error('No response body')
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''
+      let done = false
+      while (!done) {
+        const { value, done: doneReading } = await reader.read()
+        done = doneReading
+        if (value) {
+          buffer += decoder.decode(value, { stream: true })
+          // OpenAI streams lines starting with 'data: '
+          const lines = buffer.split('\n')
+          for (let i = 0; i < lines.length - 1; i++) {
+            const line = lines[i].trim()
+            if (line.startsWith('data: ')) {
+              const data = line.replace('data: ', '')
+              if (data === '[DONE]') continue
+              try {
+                const parsed = JSON.parse(data)
+                if (parsed.choices && parsed.choices[0]) {
+                  const choice = parsed.choices[0]
+                  let newContent = ''
+                  if (choice.text) {
+                    newContent = choice.text
+                  } else if (choice.delta && choice.delta.content) {
+                    newContent = choice.delta.content
+                  } else if (choice.message && choice.message.content) {
+                    newContent = choice.message.content
+                  }
+                  if (newContent) {
+                    completionResult.value += newContent
+                    // Force Vue to recognize the update
+                    completionResult.value = completionResult.value + ''
+                  }
+                }
+              } catch {
+                // ignore parse errors
+              }
+            }
+          }
+          buffer = lines[lines.length - 1]
+        }
+      }
+    } catch (error) {
+      console.error('Error streaming completion:', error)
+    }
+  } else {
+    // Non-streaming mode
+    try {
+      const response = await fetch(`${apiBase}/api/inference/llms/v1/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: selectedModel.value.name,
+          prompt: completionPrompt.value,
+          ...modelConfig.value,
+          stream: false
+        }),
+      })
+      const data = await response.json()
+      completionResult.value = data.choices[0].text
+    } catch (error) {
+      console.error('Error submitting completion:', error)
+    }
   }
 }
 
 // Submit chat request
 const submitChat = async () => {
   if (!selectedModel.value || !canSubmitChat.value) return
-
-  try {
-    const messages = []
-    if (systemMessage.value) {
-      messages.push({ role: 'system', content: systemMessage.value })
+  if (streaming.value) {
+    // Streaming mode
+    try {
+      const messages = []
+      if (systemMessage.value) {
+        messages.push({ role: 'system', content: systemMessage.value })
+      }
+      messages.push(...chatMessages.value)
+      const assistantMessage = { role: 'assistant', content: '' }
+      chatMessages.value.push(assistantMessage)
+      const assistantIndex = chatMessages.value.length - 1
+      const response = await fetch(`${apiBase}/api/inference/llms/v1/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: selectedModel.value.name,
+          messages,
+          ...modelConfig.value,
+          stream: true
+        }),
+      })
+      if (!response.body) throw new Error('No response body')
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''
+      let done = false
+      while (!done) {
+        const { value, done: doneReading } = await reader.read()
+        done = doneReading
+        if (value) {
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          for (let i = 0; i < lines.length - 1; i++) {
+            const line = lines[i].trim()
+            if (line.startsWith('data: ')) {
+              const data = line.replace('data: ', '')
+              if (data === '[DONE]') continue
+              try {
+                const parsed = JSON.parse(data)
+                // Support all OpenAI-compatible streaming formats
+                if (parsed.choices && parsed.choices[0]) {
+                  const choice = parsed.choices[0]
+                  let newContent = ''
+                  if (choice.delta && choice.delta.content) {
+                    newContent = choice.delta.content
+                  } else if (choice.message && choice.message.content) {
+                    newContent = choice.message.content
+                  } else if (choice.text) {
+                    newContent = choice.text
+                  }
+                  if (newContent) {
+                    chatMessages.value[assistantIndex].content += newContent
+                    chatMessages.value = [...chatMessages.value]
+                  }
+                }
+              } catch {
+                // ignore parse errors
+              }
+            }
+          }
+          buffer = lines[lines.length - 1]
+        }
+      }
+    } catch (error) {
+      console.error('Error streaming chat:', error)
     }
-    messages.push(...chatMessages.value)
-
-    const response = await fetch(`${apiBase}/api/inference/llms/v1/`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: selectedModel.value.name,
-        messages,
-        ...modelConfig.value
-      }),
-    })
-
-    const data = await response.json()
-    chatMessages.value.push({
-      role: 'assistant',
-      content: data.choices[0].message.content
-    })
-  } catch (error) {
-    console.error('Error submitting chat:', error)
+  } else {
+    // Non-streaming mode
+    try {
+      const messages = []
+      if (systemMessage.value) {
+        messages.push({ role: 'system', content: systemMessage.value })
+      }
+      messages.push(...chatMessages.value)
+      const response = await fetch(`${apiBase}/api/inference/llms/v1/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: selectedModel.value.name,
+          messages,
+          ...modelConfig.value,
+          stream: false
+        }),
+      })
+      const data = await response.json()
+      chatMessages.value.push({
+        role: 'assistant',
+        content: data.choices[0].message.content
+      })
+    } catch (error) {
+      console.error('Error submitting chat:', error)
+    }
   }
 }
 
