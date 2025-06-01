@@ -4,9 +4,9 @@ info:
   version: 1.0.0
   description: Inference Club Agent
 paths:
-  /api/inference/:
+  /api/inference/inference/:
     get:
-      operationId: inference_list
+      operationId: inference_inference_list
       tags:
       - inference
       security:
@@ -23,7 +23,7 @@ paths:
                   $ref: '#/components/schemas/InferenceRequest'
           description: ''
     post:
-      operationId: inference_create
+      operationId: inference_inference_create
       tags:
       - inference
       requestBody:
@@ -49,9 +49,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/InferenceRequest'
           description: ''
-  /api/inference/{id}/:
+  /api/inference/inference/{id}/:
     get:
-      operationId: inference_retrieve
+      operationId: inference_inference_retrieve
       parameters:
       - in: path
         name: id
@@ -73,7 +73,7 @@ paths:
                 $ref: '#/components/schemas/InferenceRequest'
           description: ''
     put:
-      operationId: inference_update
+      operationId: inference_inference_update
       parameters:
       - in: path
         name: id
@@ -107,7 +107,7 @@ paths:
                 $ref: '#/components/schemas/InferenceRequest'
           description: ''
     patch:
-      operationId: inference_partial_update
+      operationId: inference_inference_partial_update
       parameters:
       - in: path
         name: id
@@ -140,7 +140,7 @@ paths:
                 $ref: '#/components/schemas/InferenceRequest'
           description: ''
     delete:
-      operationId: inference_destroy
+      operationId: inference_inference_destroy
       parameters:
       - in: path
         name: id
@@ -156,6 +156,21 @@ paths:
       - {}
       responses:
         '204':
+          description: No response body
+  /api/inference/llms/v1/:
+    post:
+      operationId: inference_llms_v1_create
+      description: |-
+        Handle LLM inference requests in OpenAI API format.
+        Supports both chat completions and text completions.
+      tags:
+      - inference
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
           description: No response body
   /api/services/image-gen-infer/:
     post:
@@ -505,6 +520,186 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/services/llm-models/list/:
+    get:
+      operationId: services_llm_models_list_retrieve
+      description: List all active LLM models.
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
+  /api/services/tts-infer/:
+    post:
+      operationId: services_tts_infer_create
+      description: Accepts a TTS inference request (multipart/form-data), creates
+        an InferenceRequest, and triggers the Celery task.
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
+  /api/services/tts-services/:
+    get:
+      operationId: services_tts_services_list
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TTSService'
+          description: ''
+    post:
+      operationId: services_tts_services_create
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TTSService'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TTSService'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TTSService'
+        required: true
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TTSService'
+          description: ''
+  /api/services/tts-services/{id}/:
+    get:
+      operationId: services_tts_services_retrieve
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this tts service.
+        required: true
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TTSService'
+          description: ''
+    put:
+      operationId: services_tts_services_update
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this tts service.
+        required: true
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TTSService'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TTSService'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TTSService'
+        required: true
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TTSService'
+          description: ''
+    patch:
+      operationId: services_tts_services_partial_update
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this tts service.
+        required: true
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedTTSService'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedTTSService'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedTTSService'
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TTSService'
+          description: ''
+    delete:
+      operationId: services_tts_services_destroy
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this tts service.
+        required: true
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
 components:
   schemas:
     ImageGenModel:
@@ -581,6 +776,20 @@ components:
         generated_image:
           type: string
           readOnly: true
+        input_image:
+          type: string
+          nullable: true
+        tts_service:
+          type: integer
+          nullable: true
+        speech_output:
+          type: string
+          format: uri
+          nullable: true
+        speech_input:
+          type: string
+          format: uri
+          nullable: true
         created_at:
           type: string
           format: date-time
@@ -711,6 +920,20 @@ components:
         generated_image:
           type: string
           readOnly: true
+        input_image:
+          type: string
+          nullable: true
+        tts_service:
+          type: integer
+          nullable: true
+        speech_output:
+          type: string
+          format: uri
+          nullable: true
+        speech_input:
+          type: string
+          format: uri
+          nullable: true
         created_at:
           type: string
           format: date-time
@@ -749,6 +972,22 @@ components:
           type: string
           format: date-time
           readOnly: true
+    PatchedTTSService:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        slug:
+          type: string
+          maxLength: 50
+          pattern: ^[-a-zA-Z0-9_]+$
+        url:
+          type: string
+          format: uri
+          maxLength: 200
+        type:
+          $ref: '#/components/schemas/TypeEnum'
     ServiceTypeEnum:
       enum:
       - FLUX_NIM
@@ -771,6 +1010,35 @@ components:
         * `in_progress` - In Progress
         * `completed` - Completed
         * `failed` - Failed
+    TTSService:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        slug:
+          type: string
+          maxLength: 50
+          pattern: ^[-a-zA-Z0-9_]+$
+        url:
+          type: string
+          format: uri
+          maxLength: 200
+        type:
+          $ref: '#/components/schemas/TypeEnum'
+      required:
+      - id
+      - slug
+      - type
+      - url
+    TypeEnum:
+      enum:
+      - Dia
+      - ChatTTS
+      type: string
+      description: |-
+        * `Dia` - Dia
+        * `ChatTTS` - ChatTTS
   securitySchemes:
     basicAuth:
       type: http

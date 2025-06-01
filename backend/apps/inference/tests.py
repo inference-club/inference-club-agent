@@ -2,9 +2,11 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APITestCase
 from rest_framework import status
-from apps.services.models import TTSService
+from apps.services.models import TTSService, LLMModel
 
-from .models import InferenceRequest
+from apps.inference.models import InferenceRequest
+
+import pytest
 
 class InferenceRequestTTSServiceFilterTests(APITestCase):
     def setUp(self):
@@ -45,3 +47,70 @@ class InferenceRequestTTSServiceFilterTests(APITestCase):
         response = self.client.get(url, {'tts_service': 9999})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 0)
+
+class LLMInferenceTests(APITestCase):
+    def setUp(self):
+        self.llm_service = LLMModel.objects.create(
+            name="Qwen/Qwen3-8B",
+            base_url="http://192.168.5.173:8000/v1",
+            is_active=True
+        )
+
+    # @pytest.mark.skip(reason="Requires local LLM service to be running")
+    def test_llm_chat_completion(self):
+        """
+        Test LLM chat completion endpoint.
+
+        To run this test in isolation:
+        pytest backend/apps/inference/tests.py::LLMInferenceTests::test_llm_chat_completion -v -s
+        """
+        url = reverse('llm_inference')
+        data = {
+            "model": "Qwen/Qwen3-8B",
+            "messages": [
+                {"role": "user", "content": "What is 2+2?"}
+            ],
+            "temperature": 0.7
+        }
+
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("choices", response.data)
+        self.assertEqual(len(response.data["choices"]), 1)
+        self.assertIn("message", response.data["choices"][0])
+        self.assertIn("content", response.data["choices"][0]["message"])
+
+        # Verify inference request was created
+        inference_request = InferenceRequest.objects.first()
+        self.assertIsNotNone(inference_request)
+        self.assertEqual(inference_request.inference_type, "llm_chat")
+        self.assertEqual(inference_request.status, "completed")
+        self.assertEqual(inference_request.llm_service, self.llm_service)
+
+    # @pytest.mark.skip(reason="Requires local LLM service to be running")
+    def test_llm_text_completion(self):
+        """
+        Test LLM text completion endpoint.
+
+        To run this test in isolation:
+        pytest backend/apps/inference/tests.py::LLMInferenceTests::test_llm_text_completion -v -s
+        """
+        url = reverse('llm_inference')
+        data = {
+            "model": "Qwen/Qwen3-8B",
+            "prompt": "What is 2+2?",
+            "temperature": 0.7
+        }
+
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("choices", response.data)
+        self.assertEqual(len(response.data["choices"]), 1)
+        self.assertIn("text", response.data["choices"][0])
+
+        # Verify inference request was created
+        inference_request = InferenceRequest.objects.first()
+        self.assertIsNotNone(inference_request)
+        self.assertEqual(inference_request.inference_type, "llm_completion")
+        self.assertEqual(inference_request.status, "completed")
+        self.assertEqual(inference_request.llm_service, self.llm_service)

@@ -18,6 +18,7 @@ RUN useradd --create-home --home-dir /code --shell /bin/bash app
 WORKDIR /code
 RUN pip install "poetry==$POETRY_VERSION"
 COPY poetry.lock pyproject.toml /code/
+# RUN poetry lock
 
 FROM base AS prod
 RUN POETRY_VIRTUALENVS_CREATE=false poetry install --only main

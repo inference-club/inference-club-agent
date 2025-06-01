@@ -25,17 +25,8 @@ export default defineNuxtConfig({
   //     stripQueryParameters: true
   //   }
   // },
-  modules: [
-    // '@nuxt/content',
-    '@nuxt/eslint',
-    '@nuxt/fonts',
-    '@nuxt/icon',
-    '@nuxt/image',
-    '@nuxt/scripts',
-    '@nuxt/test-utils',
-    '@nuxtjs/color-mode',
-    'shadcn-nuxt',
-  ],
+  modules: [// '@nuxt/content',
+  '@nuxt/eslint', '@nuxt/fonts', '@nuxt/icon', '@nuxt/image', '@nuxt/scripts', '@nuxt/test-utils', '@nuxtjs/color-mode', 'shadcn-nuxt', '@nuxtjs/mdc'],
   colorMode: {
     classSuffix: '',
     storageKey: 'theme',

@@ -138,3 +138,13 @@ def tts_infer(request):
     except Exception as e:
         logger.error(f"❌ Error in tts_infer: {str(e)}")
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+def list_llm_models(request):
+    """
+    List all active LLM models.
+    """
+    models = LLMModel.objects.filter(is_active=True)
+    serializer = LLMModelSerializer(models, many=True)
+    return Response(serializer.data)

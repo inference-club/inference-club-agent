@@ -1,6 +1,6 @@
 from django.db import models
 from django.utils import timezone
-from apps.services.models import ImageGenModel, TTSService
+from apps.services.models import ImageGenModel, TTSService, LLMModel
 
 # Create your models here.
 
@@ -31,6 +31,9 @@ class InferenceRequest(models.Model):
     )
     image_gen_service = models.ForeignKey(
         ImageGenModel, null=True, blank=True, on_delete=models.SET_NULL, related_name='inference_requests'
+    )
+    llm_service = models.ForeignKey(
+        LLMModel, null=True, blank=True, on_delete=models.SET_NULL, related_name='inference_requests'
     )
     input_image = models.TextField(null=True, blank=True, help_text="Optional input image (data URL) for canny/depth modes.")
     tts_service = models.ForeignKey(TTSService, null=True, blank=True, on_delete=models.SET_NULL, related_name='inference_requests')
