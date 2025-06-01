@@ -29,9 +29,9 @@ class InferenceRequestViewSet(viewsets.ModelViewSet):
         tts_service_id = self.request.query_params.get('tts_service')
         image_gen_service_id = self.request.query_params.get('image_gen_service')
         if tts_service_id:
-            queryset = queryset.filter(tts_service_id=tts_service_id)
+            queryset = queryset.filter(tts_service=tts_service_id)
         if image_gen_service_id:
-            queryset = queryset.filter(image_gen_service_id=image_gen_service_id)
+            queryset = queryset.filter(image_gen_service=image_gen_service_id)
         return queryset
 
     def create(self, request, *args, **kwargs):

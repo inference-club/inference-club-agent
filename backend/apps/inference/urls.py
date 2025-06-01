@@ -4,7 +4,7 @@ from .views import InferenceRequestViewSet
 from . import views
 
 router = DefaultRouter()
-router.register(r"inference", InferenceRequestViewSet)
+router.register(r"", InferenceRequestViewSet, basename="inference")
 
 urlpatterns = [
     path("", include(router.urls)),
