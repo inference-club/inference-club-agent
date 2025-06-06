@@ -10,7 +10,8 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       build-essential \
-      curl && \
+      curl \
+      ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --home-dir /code --shell /bin/bash app
@@ -27,6 +28,6 @@ RUN chown -R app:app /code
 USER app
 
 FROM base AS local
-RUN apt-get update && apt-get install procps -y # for pkill
+RUN apt-get update && apt-get install -y procps ffmpeg # for pkill and ffmpeg
 RUN POETRY_VIRTUALENVS_CREATE=false poetry install --with test,dev
 USER app

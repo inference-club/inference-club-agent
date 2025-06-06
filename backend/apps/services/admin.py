@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import LLMModel, ImageGenModel, TTSService
+from .models import LLMModel, ImageGenModel, TTSService, VideoGenService
 
 @admin.register(LLMModel)
 class LLMModelAdmin(admin.ModelAdmin):
@@ -18,3 +18,9 @@ class ImageGenModelAdmin(admin.ModelAdmin):
     ordering = ('-created_at',)
 
 admin.site.register(TTSService)
+
+@admin.register(VideoGenService)
+class VideoGenServiceAdmin(admin.ModelAdmin):
+    list_display = ('name', 'slug', 'type', 'url')
+    search_fields = ('name', 'slug')
+    prepopulated_fields = {'slug': ('name',)}

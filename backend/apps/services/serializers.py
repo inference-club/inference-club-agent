@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import LLMModel, ImageGenModel, TTSService
+from .models import LLMModel, ImageGenModel, TTSService, VideoGenService
 
 class LLMModelSerializer(serializers.ModelSerializer):
     class Meta:
@@ -21,3 +21,9 @@ class TTSServiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = TTSService
         fields = ['id', 'slug', 'url', 'type']
+
+
+class VideoGenServiceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VideoGenService
+        fields = ['id', 'name', 'url', 'slug', 'type']

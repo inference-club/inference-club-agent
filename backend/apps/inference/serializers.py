@@ -5,6 +5,7 @@ from apps.services.models import TTSService
 
 class InferenceRequestSerializer(serializers.ModelSerializer):
     generated_image = serializers.SerializerMethodField()
+    generated_video = serializers.SerializerMethodField()
     input_image = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     tts_service = serializers.PrimaryKeyRelatedField(queryset=TTSService.objects.all(), required=False, allow_null=True)
     speech_output = serializers.FileField(required=False, allow_null=True)
@@ -20,6 +21,7 @@ class InferenceRequestSerializer(serializers.ModelSerializer):
             "response",
             "error_details",
             "generated_image",
+            "generated_video",
             "input_image",
             "tts_service",
             "speech_output",
@@ -33,6 +35,7 @@ class InferenceRequestSerializer(serializers.ModelSerializer):
             "response",
             "error_details",
             "generated_image",
+            "generated_video",
             "created_at",
             "updated_at",
         ]
@@ -40,4 +43,13 @@ class InferenceRequestSerializer(serializers.ModelSerializer):
     def get_generated_image(self, obj):
         if obj.generated_image:
             return obj.generated_image.url
+        return None
+
+    def get_generated_video(self, obj):
+        if obj.generated_video:
+            # Ensure we're returning the full URL for the video
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.generated_video.url)
+            return obj.generated_video.url
         return None

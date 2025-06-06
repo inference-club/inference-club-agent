@@ -10,6 +10,7 @@ import json
 from celery import shared_task
 import os
 import time
+from ..services.comfy_api import ComfyAPI
 
 logger = logging.getLogger(__name__)
 
@@ -380,3 +381,287 @@ def process_tts_inference_request(request_id):
             inference_request.error_details = str(e)
             inference_request.save()
         return
+
+
+@app.task
+def process_video_gen_inference_request(request_id):
+    """
+    Process a video generation inference request.
+    This task handles uploading the input image to ComfyUI and manages the video generation workflow.
+    """
+    try:
+        inference_request = InferenceRequest.objects.get(id=request_id)
+        inference_request.status = 'in_progress'
+        inference_request.save()
+
+        # Get the video generation service URL
+        service_url = inference_request.video_gen_service.url.rstrip('/')
+        logger.info(f"🔍 Processing video generation request {request_id} with service URL: {service_url}")
+
+        # Initialize ComfyAPI
+        comfy_api = ComfyAPI(service_url)
+
+        # Upload the input image if one was provided
+        logger.info(f"📁 Checking for input image file in request {request_id}")
+        logger.info(f"📁 Input image file field: {inference_request.input_image_file}")
+        logger.info(f"📁 Input image file name: {inference_request.input_image_file.name if inference_request.input_image_file else 'None'}")
+
+        if inference_request.input_image_file:
+            # Get just the filename without the path
+            filename = os.path.basename(inference_request.input_image_file.name)
+            logger.info(f"📁 Found input image file: {filename}")
+
+            # Open the file in binary mode
+            try:
+                with inference_request.input_image_file.open('rb') as image_file:
+                    files = {
+                        'image': (filename, image_file, 'image/jpeg')
+                    }
+                    data = {
+                        'type': 'input',  # This will upload to the input directory
+                        'overwrite': 'true'
+                    }
+
+                    # Upload the image to ComfyUI
+                    upload_url = f"{service_url}/upload/image"
+                    logger.info(f"📤 Uploading image to ComfyUI at: {upload_url}")
+                    response = requests.post(upload_url, files=files, data=data)
+
+                    if response.status_code != 200:
+                        error_msg = f"Failed to upload image to ComfyUI: {response.text}"
+                        logger.error(f"❌ {error_msg}")
+                        raise Exception(error_msg)
+
+                    # Log the successful upload
+                    upload_response = response.json()
+                    logger.info(f"✅ Successfully uploaded image to ComfyUI: {upload_response}")
+
+                    # Store the upload response in the inference request for later use
+                    inference_request.response = {
+                        'image_upload': upload_response
+                    }
+                    inference_request.save()
+            except Exception as e:
+                logger.error(f"❌ Error opening/uploading image file: {str(e)}")
+                raise
+
+            # Get the payload from the inference request
+            payload = inference_request.payload or {}
+
+            # Load the base workflow
+            workflow = {
+                "3": {
+                    "inputs": {
+                        "seed": payload.get('seed', 1112848028041754),
+                        "steps": payload.get('steps', 20),
+                        "cfg": payload.get('cfg', 6),
+                        "sampler_name": "uni_pc",
+                        "scheduler": "simple",
+                        "denoise": 1,
+                        "model": ["37", 0],
+                        "positive": ["50", 0],
+                        "negative": ["50", 1],
+                        "latent_image": ["50", 2]
+                    },
+                    "class_type": "KSampler"
+                },
+                "6": {
+                    "inputs": {
+                        "text": ["57", 0],
+                        "clip": ["38", 0]
+                    },
+                    "class_type": "CLIPTextEncode"
+                },
+                "7": {
+                    "inputs": {
+                        "text": ["59", 0],
+                        "clip": ["38", 0]
+                    },
+                    "class_type": "CLIPTextEncode"
+                },
+                "8": {
+                    "inputs": {
+                        "samples": ["3", 0],
+                        "vae": ["39", 0]
+                    },
+                    "class_type": "VAEDecode"
+                },
+                "37": {
+                    "inputs": {
+                        "unet_name": "wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors",
+                        "weight_dtype": "default"
+                    },
+                    "class_type": "UNETLoader"
+                },
+                "38": {
+                    "inputs": {
+                        "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                        "type": "wan",
+                        "device": "default"
+                    },
+                    "class_type": "CLIPLoader"
+                },
+                "39": {
+                    "inputs": {
+                        "vae_name": "wan_2.1_vae.safetensors"
+                    },
+                    "class_type": "VAELoader"
+                },
+                "49": {
+                    "inputs": {
+                        "clip_name": "clip_vision_h.safetensors"
+                    },
+                    "class_type": "CLIPVisionLoader"
+                },
+                "50": {
+                    "inputs": {
+                        "width": payload.get('width', 512),
+                        "height": payload.get('height', 512),
+                        "length": ["56", 0],
+                        "batch_size": 1,
+                        "positive": ["6", 0],
+                        "negative": ["7", 0],
+                        "vae": ["39", 0],
+                        "clip_vision_output": ["51", 0],
+                        "start_image": ["55", 0]
+                    },
+                    "class_type": "WanImageToVideo"
+                },
+                "51": {
+                    "inputs": {
+                        "crop": "none",
+                        "clip_vision": ["49", 0],
+                        "image": ["55", 0]
+                    },
+                    "class_type": "CLIPVisionEncode"
+                },
+                "52": {
+                    "inputs": {
+                        "image": filename  # Use the uploaded image filename
+                    },
+                    "class_type": "LoadImage"
+                },
+                "55": {
+                    "inputs": {
+                        "width": payload.get('width', 512),
+                        "height": payload.get('height', 512),
+                        "interpolation": "nearest",
+                        "method": "stretch",
+                        "condition": "always",
+                        "multiple_of": 0,
+                        "image": ["52", 0]
+                    },
+                    "class_type": "ImageResize+"
+                },
+                "56": {
+                    "inputs": {
+                        "value": payload.get('frame_length', 33)
+                    },
+                    "class_type": "PrimitiveInt"
+                },
+                "57": {
+                    "inputs": {
+                        "value": payload.get('positive_prompt', '')
+                    },
+                    "class_type": "PrimitiveStringMultiline"
+                },
+                "59": {
+                    "inputs": {
+                        "value": payload.get('negative_prompt', '')
+                    },
+                    "class_type": "PrimitiveStringMultiline"
+                },
+                "62": {
+                    "inputs": {
+                        "frame_rate": payload.get('fps', 16),
+                        "loop_count": 0,
+                        "filename_prefix": "ComfyUI",
+                        "format": "video/h264-mp4",
+                        "pix_fmt": "yuv420p",
+                        "crf": 19,
+                        "save_metadata": True,
+                        "trim_to_audio": False,
+                        "pingpong": False,
+                        "save_output": True,
+                        "images": ["8", 0]
+                    },
+                    "class_type": "VHS_VideoCombine"
+                }
+            }
+
+            # Queue the prompt
+            logger.info("📤 Queueing video generation prompt...")
+            prompt_response = comfy_api.queue_prompt(workflow)
+            if not prompt_response:
+                raise Exception("Failed to queue prompt")
+
+            prompt_id = prompt_response.get('prompt_id')
+            logger.info(f"✅ Prompt queued with ID: {prompt_id}")
+
+            # Wait for the prompt to complete
+            logger.info("⏳ Waiting for video generation to complete...")
+            result = comfy_api.wait_for_prompt_completion(prompt_id)
+
+            if not result or 'outputs' not in result:
+                raise Exception("Video generation failed or timed out")
+
+            # Log the full result for debugging
+            logger.info(f"📦 Full result from ComfyUI: {json.dumps(result, indent=2)}")
+
+            # Get the output video
+            output_data = result['outputs'].get('62', {})
+            logger.info(f"📦 Output data from node 62: {json.dumps(output_data, indent=2)}")
+
+            # The VHS_VideoCombine node stores videos in the gifs array
+            if 'gifs' in output_data:
+                video_data = output_data['gifs'][0]
+            elif 'videos' in output_data:
+                video_data = output_data['videos'][0]
+            elif 'images' in output_data:
+                # Some nodes might store videos in the images array
+                video_data = output_data['images'][0]
+            else:
+                raise Exception(f"No video output found in node 62. Available keys: {list(output_data.keys())}")
+
+            video_filename = video_data['filename']
+            video_subfolder = video_data.get('subfolder', '')
+
+            # Download the video
+            logger.info(f"📥 Downloading generated video: {video_filename} from subfolder: {video_subfolder}")
+            video_response = comfy_api.get_image(video_filename, video_subfolder, 'output')
+            if not video_response:
+                raise Exception("Failed to download generated video")
+
+            # Save the MP4 video to the inference request
+            inference_request.generated_video.save(
+                f"generated_video_{inference_request.id}.mp4",
+                ContentFile(video_response.content),
+                save=False
+            )
+
+            # Update the response with the video generation details
+            inference_request.response.update({
+                'video_generation': {
+                    'prompt_id': prompt_id,
+                    'video_filename': video_filename,
+                    'video_subfolder': video_subfolder,
+                    'format': 'mp4'
+                }
+            })
+
+            inference_request.status = 'completed'
+            inference_request.save()
+            logger.info(f"✅ Successfully generated and saved video for request {request_id}")
+
+        else:
+            logger.info("ℹ️ No input image file provided for this request")
+            inference_request.status = 'failed'
+            inference_request.error_details = "No input image file provided"
+            inference_request.save()
+
+    except Exception as e:
+        logger.error(f"❌ Error processing video generation for InferenceRequest ID {request_id}: {str(e)}")
+        if inference_request:
+            inference_request.status = 'failed'
+            inference_request.error_details = str(e)
+            inference_request.save()

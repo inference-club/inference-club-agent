@@ -65,15 +65,16 @@ class InferenceRequestAdmin(admin.ModelAdmin):
         "created_at",
         "updated_at",
         "display_image",
+        "display_video",
         "short_input_image",
     )
     list_filter = ("inference_type", "status")
     search_fields = ("id", "inference_type", "status")
-    readonly_fields = ("created_at", "updated_at", "display_image", "input_image")
+    readonly_fields = ("created_at", "updated_at", "display_image", "display_video", "input_image")
     fieldsets = (
         (
             "Request Information",
-            {"fields": ("inference_type", "status", "formatted_payload", "input_image")},
+            {"fields": ("inference_type", "status", "formatted_payload", "input_image", "input_image_file")},
         ),
         (
             "Response Information",
@@ -83,6 +84,8 @@ class InferenceRequestAdmin(admin.ModelAdmin):
                     "error_details",
                     "generated_image",
                     "display_image",
+                    "generated_video",
+                    "display_video",
                 )
             },
         ),
@@ -98,6 +101,16 @@ class InferenceRequestAdmin(admin.ModelAdmin):
         return "No image generated"
 
     display_image.short_description = "Generated Image"
+
+    def display_video(self, obj):
+        if obj.generated_video:
+            return format_html(
+                '<video width="320" height="240" controls><source src="{}" type="video/mp4">Your browser does not support the video tag.</video>',
+                obj.generated_video.url,
+            )
+        return "No video generated"
+
+    display_video.short_description = "Generated Video"
 
     def short_input_image(self, obj):
         if obj.input_image:

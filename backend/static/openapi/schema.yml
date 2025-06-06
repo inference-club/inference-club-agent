@@ -4,9 +4,9 @@ info:
   version: 1.0.0
   description: Inference Club Agent
 paths:
-  /api/inference/inference/:
+  /api/inference/:
     get:
-      operationId: inference_inference_list
+      operationId: inference_list
       tags:
       - inference
       security:
@@ -23,7 +23,7 @@ paths:
                   $ref: '#/components/schemas/InferenceRequest'
           description: ''
     post:
-      operationId: inference_inference_create
+      operationId: inference_create
       tags:
       - inference
       requestBody:
@@ -49,9 +49,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/InferenceRequest'
           description: ''
-  /api/inference/inference/{id}/:
+  /api/inference/{id}/:
     get:
-      operationId: inference_inference_retrieve
+      operationId: inference_retrieve
       parameters:
       - in: path
         name: id
@@ -73,7 +73,7 @@ paths:
                 $ref: '#/components/schemas/InferenceRequest'
           description: ''
     put:
-      operationId: inference_inference_update
+      operationId: inference_update
       parameters:
       - in: path
         name: id
@@ -107,7 +107,7 @@ paths:
                 $ref: '#/components/schemas/InferenceRequest'
           description: ''
     patch:
-      operationId: inference_inference_partial_update
+      operationId: inference_partial_update
       parameters:
       - in: path
         name: id
@@ -140,7 +140,7 @@ paths:
                 $ref: '#/components/schemas/InferenceRequest'
           description: ''
     delete:
-      operationId: inference_inference_destroy
+      operationId: inference_destroy
       parameters:
       - in: path
         name: id
@@ -162,7 +162,7 @@ paths:
       operationId: inference_llms_v1_create
       description: |-
         Handle LLM inference requests in OpenAI API format.
-        Supports both chat completions and text completions.
+        Supports both chat completions and text completions, including streaming.
       tags:
       - inference
       security:
@@ -700,6 +700,188 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/services/video-gen-infer/:
+    post:
+      operationId: services_video_gen_infer_create
+      description: Accepts a video generation inference request (multipart/form-data),
+        creates an InferenceRequest, and triggers the Celery task.
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
+  /api/services/video-gen-services/:
+    get:
+      operationId: services_video_gen_services_list
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VideoGenService'
+          description: ''
+    post:
+      operationId: services_video_gen_services_create
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VideoGenService'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/VideoGenService'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/VideoGenService'
+        required: true
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoGenService'
+          description: ''
+  /api/services/video-gen-services/{slug}/:
+    get:
+      operationId: services_video_gen_services_retrieve
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+        required: true
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoGenService'
+          description: ''
+    put:
+      operationId: services_video_gen_services_update
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+        required: true
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VideoGenService'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/VideoGenService'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/VideoGenService'
+        required: true
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoGenService'
+          description: ''
+    patch:
+      operationId: services_video_gen_services_partial_update
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+        required: true
+      tags:
+      - services
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedVideoGenService'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedVideoGenService'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedVideoGenService'
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoGenService'
+          description: ''
+    delete:
+      operationId: services_video_gen_services_destroy
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+        required: true
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '204':
+          description: No response body
+  /api/services/video-gen-services/{slug}/requests/:
+    get:
+      operationId: services_video_gen_services_requests_retrieve
+      description: List all inference requests for a specific video generation service.
+      parameters:
+      - in: path
+        name: slug
+        schema:
+          type: string
+        required: true
+      tags:
+      - services
+      security:
+      - cookieAuth: []
+      - basicAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
 components:
   schemas:
     ImageGenModel:
@@ -776,6 +958,9 @@ components:
         generated_image:
           type: string
           readOnly: true
+        generated_video:
+          type: string
+          readOnly: true
         input_image:
           type: string
           nullable: true
@@ -802,6 +987,7 @@ components:
       - created_at
       - error_details
       - generated_image
+      - generated_video
       - id
       - inference_type
       - payload
@@ -813,11 +999,13 @@ components:
       - llm_chat
       - llm_completion
       - image_generation
+      - video_generation
       type: string
       description: |-
         * `llm_chat` - LLM Chat
         * `llm_completion` - LLM Completion
         * `image_generation` - Image Generation
+        * `video_generation` - Video Generation
     LLMModel:
       type: object
       properties:
@@ -920,6 +1108,9 @@ components:
         generated_image:
           type: string
           readOnly: true
+        generated_video:
+          type: string
+          readOnly: true
         input_image:
           type: string
           nullable: true
@@ -987,7 +1178,26 @@ components:
           format: uri
           maxLength: 200
         type:
-          $ref: '#/components/schemas/TypeEnum'
+          $ref: '#/components/schemas/TTSServiceTypeEnum'
+    PatchedVideoGenService:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          maxLength: 255
+        url:
+          type: string
+          format: uri
+          maxLength: 200
+        slug:
+          type: string
+          maxLength: 50
+          pattern: ^[-a-zA-Z0-9_]+$
+        type:
+          $ref: '#/components/schemas/VideoGenServiceTypeEnum'
     ServiceTypeEnum:
       enum:
       - FLUX_NIM
@@ -1025,13 +1235,13 @@ components:
           format: uri
           maxLength: 200
         type:
-          $ref: '#/components/schemas/TypeEnum'
+          $ref: '#/components/schemas/TTSServiceTypeEnum'
       required:
       - id
       - slug
       - type
       - url
-    TypeEnum:
+    TTSServiceTypeEnum:
       enum:
       - Dia
       - ChatTTS
@@ -1039,6 +1249,36 @@ components:
       description: |-
         * `Dia` - Dia
         * `ChatTTS` - ChatTTS
+    VideoGenService:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          maxLength: 255
+        url:
+          type: string
+          format: uri
+          maxLength: 200
+        slug:
+          type: string
+          maxLength: 50
+          pattern: ^[-a-zA-Z0-9_]+$
+        type:
+          $ref: '#/components/schemas/VideoGenServiceTypeEnum'
+      required:
+      - id
+      - name
+      - slug
+      - type
+      - url
+    VideoGenServiceTypeEnum:
+      enum:
+      - HUNYUAN_VIDEO
+      type: string
+      description: '* `HUNYUAN_VIDEO` - Hunyuan Video'
   securitySchemes:
     basicAuth:
       type: http

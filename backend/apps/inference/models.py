@@ -1,6 +1,6 @@
 from django.db import models
 from django.utils import timezone
-from apps.services.models import ImageGenModel, TTSService, LLMModel
+from apps.services.models import ImageGenModel, TTSService, LLMModel, VideoGenService
 
 # Create your models here.
 
@@ -10,6 +10,7 @@ class InferenceRequest(models.Model):
         ("llm_chat", "LLM Chat"),
         ("llm_completion", "LLM Completion"),
         ("image_generation", "Image Generation"),
+        ("video_generation", "Video Generation"),
     ]
 
     STATUS_CHOICES = [
@@ -29,14 +30,20 @@ class InferenceRequest(models.Model):
     generated_image = models.ImageField(
         upload_to="generated_images/", null=True, blank=True
     )
+    generated_video = models.FileField(
+        upload_to="generated_videos/", null=True, blank=True,
+        help_text="Generated video file from video generation requests"
+    )
     image_gen_service = models.ForeignKey(
         ImageGenModel, null=True, blank=True, on_delete=models.SET_NULL, related_name='inference_requests'
     )
     llm_service = models.ForeignKey(
         LLMModel, null=True, blank=True, on_delete=models.SET_NULL, related_name='inference_requests'
     )
-    input_image = models.TextField(null=True, blank=True, help_text="Optional input image (data URL) for canny/depth modes.")
+    input_image = models.TextField(null=True, blank=True, help_text="Optional input image data URL for reference.")
+    input_image_file = models.ImageField(upload_to='input_images/', null=True, blank=True, help_text="Optional uploaded input image file.")
     tts_service = models.ForeignKey(TTSService, null=True, blank=True, on_delete=models.SET_NULL, related_name='inference_requests')
+    video_gen_service = models.ForeignKey(VideoGenService, null=True, blank=True, on_delete=models.SET_NULL, related_name='inference_requests')
     speech_output = models.FileField(upload_to='tts_outputs/', null=True, blank=True)
     speech_input = models.FileField(upload_to='tts_inputs/', null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)

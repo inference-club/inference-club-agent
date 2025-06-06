@@ -1,13 +1,18 @@
 from django.shortcuts import render, get_object_or_404
 from rest_framework import viewsets, status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from .models import LLMModel, ImageGenModel, TTSService
-from .serializers import LLMModelSerializer, ImageGenModelSerializer, TTSServiceSerializer
+from .models import LLMModel, ImageGenModel, TTSService, VideoGenService
+from .serializers import (
+    LLMModelSerializer,
+    ImageGenModelSerializer,
+    TTSServiceSerializer,
+    VideoGenServiceSerializer,
+)
 from apps.inference.models import InferenceRequest
 from apps.inference.serializers import InferenceRequestSerializer
-from apps.inference.tasks import process_image_gen_inference_request, process_tts_inference_request
+from apps.inference.tasks import process_image_gen_inference_request, process_tts_inference_request, process_video_gen_inference_request
 from django.core.files.uploadedfile import InMemoryUploadedFile, TemporaryUploadedFile
 import logging
 
@@ -141,6 +146,7 @@ def tts_infer(request):
 
 
 @api_view(['GET'])
+@permission_classes([AllowAny])
 def list_llm_models(request):
     """
     List all active LLM models.
@@ -148,3 +154,92 @@ def list_llm_models(request):
     models = LLMModel.objects.filter(is_active=True)
     serializer = LLMModelSerializer(models, many=True)
     return Response(serializer.data)
+
+
+class VideoGenServiceViewSet(viewsets.ModelViewSet):
+    queryset = VideoGenService.objects.all()
+    serializer_class = VideoGenServiceSerializer
+    permission_classes = [AllowAny]
+    lookup_field = 'slug'
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def video_gen_infer(request):
+    """
+    Accepts a video generation inference request (multipart/form-data), creates an InferenceRequest, and triggers the Celery task.
+    """
+    try:
+        logger.info("🚀 Received video generation request with data: %s", request.data)
+        logger.info("📁 Files in request: %s", request.FILES)
+
+        video_gen_service_id = request.data.get('video_gen_service')
+        video_gen_service = VideoGenService.objects.get(id=video_gen_service_id)
+        prompt = request.data.get('prompt', '')
+        negative_prompt = request.data.get('negative_prompt', '')
+        num_frames = int(request.data.get('num_frames', 16))
+        width = int(request.data.get('width', 512))
+        height = int(request.data.get('height', 512))
+        num_inference_steps = int(request.data.get('num_inference_steps', 50))
+        guidance_scale = float(request.data.get('guidance_scale', 7.5))
+        seed = int(request.data.get('seed', -1))
+        input_image = request.FILES.get('input_image')
+
+        logger.info("🖼️ Input image file: %s", input_image)
+
+        payload = {
+            'prompt': prompt,
+            'negative_prompt': negative_prompt,
+            'num_frames': num_frames,
+            'width': width,
+            'height': height,
+            'num_inference_steps': num_inference_steps,
+            'guidance_scale': guidance_scale,
+            'seed': seed
+        }
+
+        inference_request = InferenceRequest.objects.create(
+            inference_type='video_generation',
+            payload=payload,
+            video_gen_service=video_gen_service,
+            status='requested',
+        )
+
+        # Save the uploaded image file if one was provided
+        if input_image:
+            logger.info("💾 Saving input image file to inference request")
+            inference_request.input_image_file = input_image
+            inference_request.save()
+            logger.info("✅ Input image file saved successfully")
+
+        logger.info(f"📝 Created Video Generation InferenceRequest ID {inference_request.id} for service '{video_gen_service.slug}'")
+        process_video_gen_inference_request.delay(inference_request.id)
+        logger.info(f"📤 Dispatched Celery task for Video Generation InferenceRequest ID {inference_request.id}")
+        return Response({
+            'request_id': inference_request.id,
+            'status': inference_request.status
+        }, status=status.HTTP_201_CREATED)
+    except Exception as e:
+        logger.error(f"❌ Error in video_gen_infer: {str(e)}")
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def list_video_gen_requests(request, slug):
+    """
+    List all inference requests for a specific video generation service.
+    """
+    try:
+        service = VideoGenService.objects.get(slug=slug)
+        requests = InferenceRequest.objects.filter(
+            video_gen_service=service,
+            inference_type='video_generation'
+        ).order_by('-created_at')
+        serializer = InferenceRequestSerializer(requests, many=True)
+        return Response(serializer.data)
+    except VideoGenService.DoesNotExist:
+        return Response({'error': 'Service not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        logger.error(f"❌ Error listing video generation requests: {str(e)}")
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

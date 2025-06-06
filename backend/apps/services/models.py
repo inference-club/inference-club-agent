@@ -62,3 +62,17 @@ class TTSService(models.Model):
 
     def __str__(self):
         return f"{self.slug} ({self.type})"
+
+
+class VideoGenService(models.Model):
+    name = models.CharField(max_length=255)
+    url = models.URLField()
+    slug = models.SlugField(unique=True)
+    type = models.CharField(max_length=20, choices=[('HUNYUAN_VIDEO', 'Hunyuan Video')])
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        verbose_name = "Video Generation Service"
+        verbose_name_plural = "Video Generation Services"

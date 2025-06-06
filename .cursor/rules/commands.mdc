@@ -1,0 +1,14 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+When creating Django backend commands, use the following format:
+
+docker compose exec -it backend <django-management-command>
+
+For example:
+
+```
+docker compose exec -it backend python manage.py makemigrations
+```
