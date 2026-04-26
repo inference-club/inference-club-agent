@@ -1,0 +1,16 @@
+# Built binaries
+inference-club-agent
+out/
+
+# Go
+*.test
+*.out
+go.sum
+
+# Local env
+.env
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
