@@ -119,9 +119,12 @@ func newOpenAIProxy(target *url.URL) http.Handler {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	defaultDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
+		// Capture the incoming path BEFORE defaultDirector clobbers it via
+		// singleJoiningSlash(target.Path, req.URL.Path). Without this, a
+		// LOCAL_LLM_URL ending in /v1 produces /v1/v1/models on the upstream.
+		origPath := req.URL.Path
 		defaultDirector(req)
-		// httputil doesn't preserve target.Path; route /v1/* to {target.Path}/*.
-		req.URL.Path = strings.TrimSuffix(target.Path, "/") + strings.TrimPrefix(req.URL.Path, "/v1")
+		req.URL.Path = strings.TrimSuffix(target.Path, "/") + strings.TrimPrefix(origPath, "/v1")
 		req.Host = target.Host
 		req.Header.Set("X-Forwarded-Host", target.Host)
 	}
