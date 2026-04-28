@@ -1,0 +1,56 @@
+# inference-club-agent — service manifest
+#
+# Describes the hosts in your home network, each host's GPU, and the LLM
+# services running on each host. The agent uploads this to inference.club
+# on startup so your public profile at inference.club/<github_login>
+# renders the same picture you describe here.
+#
+# Mount this file into the container at /etc/inference-club-agent/agent.yaml
+# (see README docker-compose snippet). Edit it on the host and SIGHUP the
+# container to reload:
+#
+#   docker kill -s HUP club-host
+#
+# Validate without restarting with:
+#
+#   docker exec club-host inference-club-agent doctor
+
+schema_version: 1
+
+agent:
+  name: brian-home              # label in the inference.club dashboard
+  hostname: club-host-brian     # tailnet hostname (server may rewrite)
+  listen_port: 443
+
+hosts:
+  - id: rig-01                  # short, unique within this manifest
+    hostname: rig-01.local      # display only
+    address: 192.168.1.10       # LAN IP, display only
+    gpu:
+      vendor: nvidia            # nvidia | amd | apple | intel
+      model: RTX 4090
+      vram_gb: 24
+      count: 1
+    notes: "main rig"
+    services:
+      - name: rtx-4090-vllm     # must be unique across the whole manifest
+        engine: vllm            # vllm | lmstudio | ollama | sglang | llamacpp | tgi | other
+        url: http://192.168.1.10:8000/v1
+        models:
+          - id: qwen3-30b-a3b
+          - id: mistral-small-3.1
+        command: >              # optional, free-form, for display
+          vllm serve Qwen/Qwen3-30B-A3B
+          --tensor-parallel-size 1 --max-model-len 32768
+
+  - id: mac-studio
+    address: 192.168.1.20
+    gpu:
+      vendor: apple
+      model: M2 Ultra
+      vram_gb: 64               # unified memory
+    services:
+      - name: mac-studio-lmstudio
+        engine: lmstudio
+        url: http://192.168.1.20:1234/v1
+        # No `models:` — server auto-discovers via GET /v1/models.

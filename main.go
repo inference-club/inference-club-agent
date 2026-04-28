@@ -17,12 +17,18 @@
 //
 //	INFERENCE_CLUB_API_KEY   account-level key from https://inference.club/dashboard
 //	INFERENCE_CLUB_URL       central server (default: https://inference.club)
-//	LOCAL_LLM_URL            e.g. http://host.docker.internal:1234/v1
-//	AGENT_NAME               friendly name shown in the inference.club UI
+//	LOCAL_LLM_URL            e.g. http://host.docker.internal:1234/v1 (used only when no manifest)
+//	AGENT_NAME               friendly name shown in the inference.club UI (used only when no manifest)
 //	AGENT_HOSTNAME           tailnet hostname (default: club-host-<rand>)
 //	AGENT_STATE_DIR          where to cache tsnet state + authkey (default: /var/lib/club-host)
 //	AGENT_LISTEN_PORT        port inside the tailnet (default: 443)
+//	AGENT_CONFIG_FILE        path to agent.yaml (default: /etc/inference-club-agent/agent.yaml)
 //	TAILSCALE_LOGIN_SERVER   override for Headscale (default: empty → Tailscale's control plane)
+//
+// Subcommands:
+//
+//	doctor   load + validate the manifest, probe each service URL,
+//	         print actionable diagnostics, exit non-zero on failure.
 package main
 
 import (
@@ -40,18 +46,43 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/briancaffey/inference-club-agent/host-agent/internal/manifest"
 	"tailscale.com/tsnet"
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "doctor":
+			os.Exit(runDoctor())
+		case "-h", "--help", "help":
+			fmt.Fprintln(os.Stderr, "usage: inference-club-agent [doctor]")
+			os.Exit(0)
+		}
+	}
+
 	cfg := loadConfig()
+
+	mf, mfErrs := loadManifest(cfg)
+	if mfErrs != nil {
+		log.Fatalf("manifest invalid — fix and restart:\n  - %s",
+			strings.Join(mfErrs, "\n  - "))
+	}
+	// The manifest is the source of truth when present: agent.name and
+	// agent.hostname/listen_port from YAML override env-var equivalents,
+	// so the manifest the operator uploads describes the same identity
+	// that registered with inference.club.
+	applyManifestToConfig(cfg, mf)
 
 	if err := ensureAuthKey(cfg); err != nil {
 		log.Fatalf("registration failed: %v", err)
 	}
+
+	pushManifest(cfg, mf)
 
 	srv := &tsnet.Server{
 		Hostname:  cfg.Hostname,
@@ -66,6 +97,26 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// SIGHUP → reload + revalidate + reupload the manifest. We do not
+	// touch the running tsnet listener; manifest changes are
+	// metadata-only from inference.club's perspective. The router
+	// (Phase 1 of the agent ROADMAP) will pick this up to swap
+	// backends; for PR 2 the only effect is the upload.
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	go func() {
+		for range hupCh {
+			log.Print("SIGHUP received — reloading manifest")
+			newMF, errs := loadManifest(cfg)
+			if errs != nil {
+				log.Printf("manifest reload failed (keeping previous):\n  - %s",
+					strings.Join(errs, "\n  - "))
+				continue
+			}
+			pushManifest(cfg, newMF)
+		}
+	}()
 
 	log.Printf("starting tsnet hostname=%q state=%q", cfg.Hostname, cfg.StateDir)
 	if _, err := srv.Up(ctx); err != nil {
@@ -146,6 +197,9 @@ type config struct {
 	ListenPort  int
 	AuthKey     string
 	LoginServer string
+	ConfigFile  string
+
+	mu sync.Mutex // guards Name/Hostname/ListenPort under SIGHUP reload
 }
 
 func loadConfig() *config {
@@ -158,6 +212,7 @@ func loadConfig() *config {
 		StateDir:    getenv("AGENT_STATE_DIR", "/var/lib/club-host"),
 		ListenPort:  443,
 		LoginServer: getenv("TAILSCALE_LOGIN_SERVER", ""),
+		ConfigFile:  getenv("AGENT_CONFIG_FILE", "/etc/inference-club-agent/agent.yaml"),
 	}
 	if v := os.Getenv("AGENT_LISTEN_PORT"); v != "" {
 		if _, err := fmt.Sscanf(v, "%d", &c.ListenPort); err != nil {
@@ -181,37 +236,45 @@ func ensureAuthKey(c *config) error {
 		return fmt.Errorf("mkdir state dir: %w", err)
 	}
 	keyPath := filepath.Join(c.StateDir, "authkey")
+
+	// Always re-register when the API key is available. Register is
+	// idempotent on the server (update_or_create on user+name) and the
+	// response carries the canonical tailnet hostname the server has
+	// recorded for this Provider — e.g. "club-host-1". Without this,
+	// the agent's tsnet identity drifts on restart: cfg.Hostname comes
+	// from env/YAML ("club-host"), tsnet renames the node away from
+	// "club-host-1", and the backend can no longer reach the agent
+	// because its SOCKS proxy can't resolve the now-stale name. (Bug
+	// hidden because last_seen_at was last bumped at first registration.)
+	if c.APIKey != "" {
+		resp, err := register(c)
+		if err == nil && resp.TailscaleAuthkey != "" {
+			if werr := os.WriteFile(keyPath, []byte(resp.TailscaleAuthkey), 0o600); werr != nil {
+				log.Printf("warn: write authkey: %v", werr)
+			}
+			c.AuthKey = resp.TailscaleAuthkey
+			if resp.TailscaleLoginServer != "" {
+				c.LoginServer = resp.TailscaleLoginServer
+			}
+			if resp.TailnetHostname != "" {
+				c.Hostname = resp.TailnetHostname
+			}
+			log.Printf("registered as provider_id=%d tailnet_hostname=%s",
+				resp.ProviderID, c.Hostname)
+			return nil
+		}
+		log.Printf("register failed (%v) — falling back to cached authkey", err)
+	}
+
 	if data, err := os.ReadFile(keyPath); err == nil && len(bytes.TrimSpace(data)) > 0 {
 		c.AuthKey = string(bytes.TrimSpace(data))
-		log.Print("loaded cached tailscale authkey")
+		log.Print("loaded cached tailscale authkey (no API key for re-registration; " +
+			"if the agent appears offline upstream, set INFERENCE_CLUB_API_KEY and " +
+			"restart so we can refetch the canonical tailnet hostname)")
 		return nil
 	}
 
-	if c.APIKey == "" {
-		return errors.New("no cached authkey and INFERENCE_CLUB_API_KEY not set — generate one at https://inference.club/dashboard and pass it via env")
-	}
-
-	resp, err := register(c)
-	if err != nil {
-		return err
-	}
-	if resp.TailscaleAuthkey == "" {
-		return errors.New("register endpoint returned an empty tailscale_authkey — central server's Tailscale OAuth client may not be configured")
-	}
-	if err := os.WriteFile(keyPath, []byte(resp.TailscaleAuthkey), 0o600); err != nil {
-		return fmt.Errorf("write authkey: %w", err)
-	}
-	c.AuthKey = resp.TailscaleAuthkey
-	if resp.TailscaleLoginServer != "" {
-		c.LoginServer = resp.TailscaleLoginServer
-	}
-	if resp.TailnetHostname != "" {
-		// Server is allowed to dictate the tailnet hostname so it lines up
-		// with the Provider record on its end.
-		c.Hostname = resp.TailnetHostname
-	}
-	log.Printf("registered as provider_id=%d tailnet_hostname=%s", resp.ProviderID, c.Hostname)
-	return nil
+	return errors.New("no cached authkey and INFERENCE_CLUB_API_KEY not set — generate one at https://inference.club/dashboard and pass it via env")
 }
 
 type registerResponse struct {
@@ -219,6 +282,81 @@ type registerResponse struct {
 	TailscaleAuthkey     string `json:"tailscale_authkey"`
 	TailscaleLoginServer string `json:"tailscale_login_server"`
 	TailnetHostname      string `json:"tailnet_hostname"`
+}
+
+// loadManifest reads agent.yaml from cfg.ConfigFile. If the file is
+// absent, it synthesizes a one-host / one-service manifest from the
+// pre-YAML env vars (back-compat path so existing single-LLM users keep
+// working with zero config changes).
+//
+// Returns (manifest, validationErrors). A nil error slice means the
+// manifest is valid; a non-nil slice means caller must decide whether
+// to abort (startup) or keep the previous manifest (reload).
+func loadManifest(cfg *config) (*manifest.LoadResult, []string) {
+	if _, err := os.Stat(cfg.ConfigFile); errors.Is(err, os.ErrNotExist) {
+		log.Printf("no manifest at %s — synthesizing from env vars", cfg.ConfigFile)
+		m := manifest.SynthesizeFromEnv(
+			os.Getenv("AGENT_NAME"),
+			os.Getenv("AGENT_LISTEN_PORT"),
+			cfg.LocalLLMURL,
+		)
+		errs := manifest.Validate(m)
+		if errs != nil {
+			return nil, errs
+		}
+		return &manifest.LoadResult{Manifest: m, Raw: nil}, nil
+	}
+
+	lr, errs, err := manifest.Load(cfg.ConfigFile)
+	if err != nil {
+		return nil, []string{err.Error()}
+	}
+	if errs != nil {
+		return nil, errs
+	}
+	log.Printf("loaded manifest from %s (%d hosts)", cfg.ConfigFile, len(lr.Manifest.Hosts))
+	return lr, nil
+}
+
+// applyManifestToConfig lets the manifest override the env-var-derived
+// config so registration uses the operator's chosen identity.
+func applyManifestToConfig(cfg *config, lr *manifest.LoadResult) {
+	if lr == nil || lr.Manifest == nil {
+		return
+	}
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+	if name := strings.TrimSpace(lr.Manifest.Agent.Name); name != "" {
+		cfg.Name = name
+	}
+	if h := strings.TrimSpace(lr.Manifest.Agent.Hostname); h != "" {
+		cfg.Hostname = h
+	}
+	if p := lr.Manifest.Agent.ListenPort; p > 0 && p <= 65535 {
+		cfg.ListenPort = p
+	}
+}
+
+// pushManifest uploads the manifest to inference.club. Errors are logged
+// and ignored — a failed upload should not take down the agent (the
+// router still works on locally-cached config).
+func pushManifest(cfg *config, lr *manifest.LoadResult) {
+	if lr == nil || cfg.APIKey == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := manifest.Push(ctx, cfg.BaseURL, cfg.APIKey, lr)
+	if err != nil {
+		log.Printf("manifest upload failed: %v", err)
+		return
+	}
+	if len(res.Errors) > 0 {
+		log.Printf("manifest accepted but server flagged it invalid (status %d):\n  - %s",
+			res.StatusCode, strings.Join(res.Errors, "\n  - "))
+		return
+	}
+	log.Printf("manifest uploaded (status %d)", res.StatusCode)
 }
 
 func register(c *config) (*registerResponse, error) {

@@ -1,0 +1,306 @@
+// Package manifest loads and validates the operator's service manifest —
+// a YAML description of the hosts in their home network, each host's GPU,
+// and the LLM services running on each host.
+//
+// The manifest is uploaded to inference.club (see upload.go) so the
+// operator's public profile at inference.club/<github_login> can render
+// the same picture the operator wrote in YAML.
+//
+// See `docs/plans/service-manifest.md` in the inference.club repo for the
+// authoritative shape and field semantics.
+package manifest
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"os"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// SchemaVersion is the only schema_version this build understands. The
+// server keeps a small accept-list and may accept older versions, but the
+// agent always emits the newest it knows.
+const SchemaVersion = 1
+
+// Limits — see `docs/plans/service-manifest.md` §6. Mirrors the
+// server-side validator in `apps/inference/manifest_validator.py`.
+const (
+	MaxRawYAMLBytes = 64 * 1024
+	MaxHosts        = 50
+	MaxServices     = 100
+	MaxStringLen    = 1024
+)
+
+var (
+	gpuVendors = map[string]struct{}{
+		"nvidia": {}, "amd": {}, "apple": {}, "intel": {},
+	}
+	engines = map[string]struct{}{
+		"vllm": {}, "lmstudio": {}, "ollama": {}, "sglang": {},
+		"llamacpp": {}, "tgi": {}, "other": {},
+	}
+)
+
+// Manifest is the root document.
+type Manifest struct {
+	SchemaVersion int    `yaml:"schema_version" json:"schema_version"`
+	Agent         Agent  `yaml:"agent" json:"agent"`
+	Hosts         []Host `yaml:"hosts" json:"hosts"`
+}
+
+// Agent identifies this agent to inference.club. ``Name`` is also the
+// lookup key the server uses to bind a manifest to a Provider row.
+type Agent struct {
+	Name       string `yaml:"name" json:"name"`
+	Hostname   string `yaml:"hostname,omitempty" json:"hostname,omitempty"`
+	ListenPort int    `yaml:"listen_port,omitempty" json:"listen_port,omitempty"`
+}
+
+// Host is one machine in the operator's home network.
+type Host struct {
+	ID       string    `yaml:"id" json:"id"`
+	Hostname string    `yaml:"hostname,omitempty" json:"hostname,omitempty"`
+	Address  string    `yaml:"address,omitempty" json:"address,omitempty"`
+	GPU      *GPU      `yaml:"gpu,omitempty" json:"gpu,omitempty"`
+	Notes    string    `yaml:"notes,omitempty" json:"notes,omitempty"`
+	Services []Service `yaml:"services,omitempty" json:"services,omitempty"`
+}
+
+// GPU is enough for display — vendor + model + VRAM. We deliberately
+// don't try to enumerate every spec; this is operator-entered text.
+type GPU struct {
+	Vendor string  `yaml:"vendor,omitempty" json:"vendor,omitempty"`
+	Model  string  `yaml:"model,omitempty" json:"model,omitempty"`
+	VRAMGB float64 `yaml:"vram_gb,omitempty" json:"vram_gb,omitempty"`
+	Count  int     `yaml:"count,omitempty" json:"count,omitempty"`
+}
+
+// Service is one LLM inference endpoint running on a Host. ``Name`` doubles
+// as the router-key for the multi-backend router (see the agent ROADMAP).
+type Service struct {
+	Name    string            `yaml:"name" json:"name"`
+	Engine  string            `yaml:"engine" json:"engine"`
+	URL     string            `yaml:"url" json:"url"`
+	Models  []Model           `yaml:"models,omitempty" json:"models,omitempty"`
+	Command string            `yaml:"command,omitempty" json:"command,omitempty"`
+	Extra   map[string]string `yaml:"extra,omitempty" json:"extra,omitempty"`
+}
+
+// Model is the OpenAI-compatible model id the service serves.
+type Model struct {
+	ID string `yaml:"id" json:"id"`
+}
+
+// LoadResult bundles the parsed manifest with the raw YAML bytes — the
+// server wants both, so we don't have to re-encode to push.
+type LoadResult struct {
+	Manifest *Manifest
+	Raw      []byte
+}
+
+// Load reads, parses, and validates a manifest from disk. Returns the
+// parsed manifest, the raw bytes, and any validation errors. A non-nil
+// LoadResult means the file parsed; ``errs`` may still be non-empty if
+// validation failed.
+func Load(path string) (*LoadResult, []string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read manifest: %w", err)
+	}
+	if len(raw) > MaxRawYAMLBytes {
+		return nil, nil, fmt.Errorf(
+			"manifest %s is %d bytes, exceeds %d byte limit",
+			path, len(raw), MaxRawYAMLBytes,
+		)
+	}
+	var m Manifest
+	if err := yaml.Unmarshal(raw, &m); err != nil {
+		return nil, nil, fmt.Errorf("parse manifest: %w", err)
+	}
+	errs := Validate(&m)
+	return &LoadResult{Manifest: &m, Raw: raw}, errs, nil
+}
+
+// AsJSONMap converts the manifest to a generic map[string]any so we can
+// PUT it to inference.club as JSON — the server validates JSON, not YAML.
+func (m *Manifest) AsJSONMap() (map[string]any, error) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Validate inspects the whole structure and returns every problem it
+// finds, so the operator gets one round-trip with everything wrong instead
+// of fix-one-find-next.
+//
+// Mirrors the server-side validator in
+// ``apps/inference/manifest_validator.py``. Keep them in sync.
+func Validate(m *Manifest) []string {
+	if m == nil {
+		return []string{"manifest is nil"}
+	}
+	var errs []string
+
+	if m.SchemaVersion != SchemaVersion {
+		errs = append(errs, fmt.Sprintf(
+			"schema_version must be %d, got %d", SchemaVersion, m.SchemaVersion,
+		))
+	}
+
+	if strings.TrimSpace(m.Agent.Name) == "" {
+		errs = append(errs, "agent.name: required non-empty string")
+	} else if len(m.Agent.Name) > MaxStringLen {
+		errs = append(errs, fmt.Sprintf("agent.name: exceeds %d chars", MaxStringLen))
+	}
+
+	if len(m.Hosts) > MaxHosts {
+		errs = append(errs, fmt.Sprintf(
+			"hosts: exceeds %d entries (got %d)", MaxHosts, len(m.Hosts),
+		))
+	}
+
+	seenHostIDs := map[string]struct{}{}
+	seenServiceNames := map[string]struct{}{}
+	totalServices := 0
+
+	for hi, h := range m.Hosts {
+		hp := fmt.Sprintf("hosts[%d]", hi)
+
+		switch {
+		case strings.TrimSpace(h.ID) == "":
+			errs = append(errs, hp+".id: required non-empty string")
+		case len(h.ID) > MaxStringLen:
+			errs = append(errs, fmt.Sprintf("%s.id: exceeds %d chars", hp, MaxStringLen))
+		default:
+			if _, dup := seenHostIDs[h.ID]; dup {
+				errs = append(errs, fmt.Sprintf("%s.id: duplicate host id %q", hp, h.ID))
+			}
+			seenHostIDs[h.ID] = struct{}{}
+		}
+
+		if h.GPU != nil {
+			if h.GPU.Vendor != "" {
+				if _, ok := gpuVendors[h.GPU.Vendor]; !ok {
+					errs = append(errs, fmt.Sprintf(
+						"%s.gpu.vendor: must be one of [amd apple intel nvidia], got %q",
+						hp, h.GPU.Vendor,
+					))
+				}
+			}
+			if h.GPU.VRAMGB < 0 {
+				errs = append(errs, hp+".gpu.vram_gb: must be non-negative")
+			}
+			if h.GPU.Count < 0 {
+				errs = append(errs, hp+".gpu.count: must be non-negative")
+			}
+		}
+
+		for _, fld := range []struct {
+			name, val string
+		}{
+			{"hostname", h.Hostname}, {"address", h.Address}, {"notes", h.Notes},
+		} {
+			if len(fld.val) > MaxStringLen {
+				errs = append(errs, fmt.Sprintf(
+					"%s.%s: exceeds %d chars", hp, fld.name, MaxStringLen,
+				))
+			}
+		}
+
+		for si, s := range h.Services {
+			totalServices++
+			sp := fmt.Sprintf("%s.services[%d]", hp, si)
+
+			switch {
+			case strings.TrimSpace(s.Name) == "":
+				errs = append(errs, sp+".name: required non-empty string")
+			case len(s.Name) > MaxStringLen:
+				errs = append(errs, fmt.Sprintf("%s.name: exceeds %d chars", sp, MaxStringLen))
+			default:
+				if _, dup := seenServiceNames[s.Name]; dup {
+					errs = append(errs, fmt.Sprintf(
+						"%s.name: duplicate service name %q (must be unique across the whole manifest)",
+						sp, s.Name,
+					))
+				}
+				seenServiceNames[s.Name] = struct{}{}
+			}
+
+			if _, ok := engines[s.Engine]; !ok {
+				errs = append(errs, fmt.Sprintf(
+					"%s.engine: must be one of [llamacpp lmstudio ollama other sglang tgi vllm], got %q",
+					sp, s.Engine,
+				))
+			}
+
+			if strings.TrimSpace(s.URL) == "" {
+				errs = append(errs, sp+".url: required non-empty string")
+			} else if u, err := url.Parse(s.URL); err != nil || u.Scheme == "" || u.Host == "" {
+				errs = append(errs, fmt.Sprintf(
+					"%s.url: must be an absolute URL with scheme and host (got %q)",
+					sp, s.URL,
+				))
+			}
+
+			if len(s.Command) > MaxStringLen {
+				errs = append(errs, fmt.Sprintf(
+					"%s.command: exceeds %d chars", sp, MaxStringLen,
+				))
+			}
+		}
+	}
+
+	if totalServices > MaxServices {
+		errs = append(errs, fmt.Sprintf(
+			"services: exceeds %d entries across all hosts (got %d)",
+			MaxServices, totalServices,
+		))
+	}
+
+	return errs
+}
+
+// SynthesizeFromEnv builds a one-host / one-service manifest from the
+// pre-YAML env vars. This is the back-compat path: existing single-LLM
+// users keep working with zero config changes.
+func SynthesizeFromEnv(agentName, listenPort, localLLMURL string) *Manifest {
+	port := 0
+	fmt.Sscanf(listenPort, "%d", &port)
+	if port == 0 {
+		port = 443
+	}
+	if agentName == "" {
+		agentName = "club-host"
+	}
+	if localLLMURL == "" {
+		localLLMURL = "http://host.docker.internal:1234/v1"
+	}
+	return &Manifest{
+		SchemaVersion: SchemaVersion,
+		Agent: Agent{
+			Name:       agentName,
+			ListenPort: port,
+		},
+		Hosts: []Host{
+			{
+				ID: "default",
+				Services: []Service{
+					{
+						Name:   agentName,
+						Engine: "other",
+						URL:    localLLMURL,
+					},
+				},
+			},
+		},
+	}
+}

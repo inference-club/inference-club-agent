@@ -79,6 +79,8 @@ services:
       LOCAL_LLM_URL: http://host.docker.internal:1234/v1
     volumes:
       - club-host-state:/var/lib/club-host
+      # Optional but recommended — see "Service manifest" below.
+      - ./agent.yaml:/etc/inference-club-agent/agent.yaml:ro
 volumes:
   club-host-state:
 ```
@@ -109,6 +111,41 @@ docker exec club-host wget -qO- http://host.docker.internal:1234/v1/models
 
 ---
 
+## Service manifest
+
+The manifest is a YAML file describing the hosts in your home network,
+each host's GPU, and the LLM services running on each host. The agent
+uploads it to inference.club on startup, so your public profile at
+`inference.club/<your-github-handle>` renders the same picture you
+write here.
+
+Start from [`agent.yaml.example`](./agent.yaml.example):
+
+```bash
+cp agent.yaml.example agent.yaml
+$EDITOR agent.yaml
+```
+
+Mount it into the container at `/etc/inference-club-agent/agent.yaml`
+(the docker-compose snippet above already does this). After editing,
+reload the agent without restarting:
+
+```bash
+docker kill -s HUP club-host
+```
+
+Validate the manifest and probe each service URL without restarting:
+
+```bash
+docker exec club-host inference-club-agent doctor
+```
+
+If you don't provide a manifest, the agent falls back to the legacy
+single-LLM behaviour driven by `LOCAL_LLM_URL` and `AGENT_NAME` — your
+existing `docker run` keeps working unchanged.
+
+---
+
 ## Env vars
 
 | name | default | required | description |
@@ -120,6 +157,7 @@ docker exec club-host wget -qO- http://host.docker.internal:1234/v1/models
 | `AGENT_HOSTNAME` | `club-host` |  | tailnet hostname |
 | `AGENT_STATE_DIR` | `/var/lib/club-host` |  | where to cache tsnet state + the auth key |
 | `AGENT_LISTEN_PORT` | `443` |  | port the agent listens on inside the tailnet |
+| `AGENT_CONFIG_FILE` | `/etc/inference-club-agent/agent.yaml` |  | path to the service manifest |
 | `TAILSCALE_LOGIN_SERVER` | — |  | override for self-hosted [Headscale](https://github.com/juanfont/headscale) |
 
 After registration the API key is no longer used — the cached Tailscale

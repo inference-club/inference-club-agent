@@ -3,9 +3,12 @@ RUN apk add --no-cache git
 WORKDIR /src
 COPY go.mod ./
 COPY *.go ./
-# Resolve tsnet (and transitive deps) and produce go.sum on the fly so the
-# repo doesn't have to commit a multi-megabyte go.sum.
-RUN go get tailscale.com/tsnet@latest && go mod tidy
+COPY internal/ ./internal/
+# Resolve tsnet + yaml.v3 (and transitive deps) and produce go.sum on the
+# fly so the repo doesn't have to commit a multi-megabyte go.sum.
+RUN go get tailscale.com/tsnet@latest && \
+    go get gopkg.in/yaml.v3 && \
+    go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/host-agent .
 
 FROM alpine:3.20
