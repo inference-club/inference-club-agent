@@ -40,17 +40,18 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/briancaffey/inference-club-agent/host-agent/internal/manifest"
+	"github.com/briancaffey/inference-club-agent/host-agent/internal/router"
 	"tailscale.com/tsnet"
 )
 
@@ -98,11 +99,19 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// SIGHUP → reload + revalidate + reupload the manifest. We do not
-	// touch the running tsnet listener; manifest changes are
-	// metadata-only from inference.club's perspective. The router
-	// (Phase 1 of the agent ROADMAP) will pick this up to swap
-	// backends; for PR 2 the only effect is the upload.
+	target, err := url.Parse(cfg.LocalLLMURL)
+	if err != nil {
+		log.Fatalf("invalid LOCAL_LLM_URL: %v", err)
+	}
+	var routerHolder atomic.Pointer[router.Router]
+	routerHolder.Store(router.New(mf.Manifest, target))
+	logRouterBackends("initial", routerHolder.Load(), cfg.LocalLLMURL)
+
+	// SIGHUP → reload + revalidate + reupload the manifest, then rebuild
+	// the model→backend router and atomically swap it in. In-flight
+	// requests keep using the previous router (their goroutine already
+	// holds the *Router pointer); new requests pick up the swap. We do
+	// not touch the running tsnet listener.
 	hupCh := make(chan os.Signal, 1)
 	signal.Notify(hupCh, syscall.SIGHUP)
 	go func() {
@@ -115,6 +124,8 @@ func main() {
 				continue
 			}
 			pushManifest(cfg, newMF)
+			routerHolder.Store(router.New(newMF.Manifest, target))
+			logRouterBackends("reloaded", routerHolder.Load(), cfg.LocalLLMURL)
 		}
 	}()
 
@@ -122,12 +133,6 @@ func main() {
 	if _, err := srv.Up(ctx); err != nil {
 		log.Fatalf("tsnet up: %v", err)
 	}
-
-	target, err := url.Parse(cfg.LocalLLMURL)
-	if err != nil {
-		log.Fatalf("invalid LOCAL_LLM_URL: %v", err)
-	}
-	proxy := newOpenAIProxy(target)
 
 	listener, err := srv.Listen("tcp", fmt.Sprintf(":%d", cfg.ListenPort))
 	if err != nil {
@@ -140,7 +145,9 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.Handle("/v1/", proxy)
+	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
+		routerHolder.Load().ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found — try /v1/models", http.StatusNotFound)
 	})
@@ -164,27 +171,19 @@ func main() {
 	_ = httpServer.Shutdown(shutdownCtx)
 }
 
-// newOpenAIProxy returns a reverse proxy that rewrites every request to
-// hit `target`. SSE streaming completions flush as data arrives.
-func newOpenAIProxy(target *url.URL) http.Handler {
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	defaultDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		// Capture the incoming path BEFORE defaultDirector clobbers it via
-		// singleJoiningSlash(target.Path, req.URL.Path). Without this, a
-		// LOCAL_LLM_URL ending in /v1 produces /v1/v1/models on the upstream.
-		origPath := req.URL.Path
-		defaultDirector(req)
-		req.URL.Path = strings.TrimSuffix(target.Path, "/") + strings.TrimPrefix(origPath, "/v1")
-		req.Host = target.Host
-		req.Header.Set("X-Forwarded-Host", target.Host)
+// logRouterBackends prints the per-backend / per-model routing the agent
+// will use, so an operator restarting the container or sending SIGHUP
+// can confirm the manifest landed the way they expected.
+func logRouterBackends(when string, r *router.Router, fallback string) {
+	backends := r.Backends()
+	if len(backends) == 0 {
+		log.Printf("router (%s): no manifest backends — all /v1/* falls back to %s", when, fallback)
+		return
 	}
-	proxy.FlushInterval = -1
-	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		log.Printf("proxy error: %v", err)
-		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+	log.Printf("router (%s): %d backend(s); unknown models fall back to %s", when, len(backends), fallback)
+	for _, b := range backends {
+		log.Printf("  backend %s", b)
 	}
-	return proxy
 }
 
 type config struct {
