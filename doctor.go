@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -16,11 +18,17 @@ import (
 //
 // Designed to be runnable inside the running container:
 //
-//	docker exec club-host inference-club-agent doctor
+//	docker exec club-host host-agent doctor
 //
 // so the operator can debug "is my YAML good and can the agent see my
 // LLM servers?" without leaving the deploy.
 func runDoctor() int {
+	// doctor prints its own formatted report via fmt; silence the standard
+	// logger so loadManifest's "loaded manifest from ..." line (useful at
+	// startup/SIGHUP) doesn't interleave into the report.
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
 	cfg := loadConfig()
 
 	fmt.Printf("config file: %s\n", cfg.ConfigFile)

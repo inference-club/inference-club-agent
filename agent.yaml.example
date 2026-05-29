@@ -13,7 +13,7 @@
 #
 # Validate without restarting with:
 #
-#   docker exec club-host inference-club-agent doctor
+#   docker exec club-host host-agent doctor
 
 schema_version: 1
 
