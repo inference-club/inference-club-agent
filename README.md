@@ -137,7 +137,7 @@ docker kill -s HUP club-host
 Validate the manifest and probe each service URL without restarting:
 
 ```bash
-docker exec club-host inference-club-agent doctor
+docker exec club-host host-agent doctor
 ```
 
 If you don't provide a manifest, the agent falls back to the legacy
@@ -156,9 +156,11 @@ existing `docker run` keeps working unchanged.
 | `AGENT_NAME` | — |  | friendly label shown in the dashboard |
 | `AGENT_HOSTNAME` | `club-host` |  | tailnet hostname |
 | `AGENT_STATE_DIR` | `/var/lib/club-host` |  | where to cache tsnet state + the auth key |
-| `AGENT_LISTEN_PORT` | `443` |  | port the agent listens on inside the tailnet |
+| `AGENT_LISTEN_PORT` | `443` (`8080` in direct mode) |  | port the agent listens on |
 | `AGENT_CONFIG_FILE` | `/etc/inference-club-agent/agent.yaml` |  | path to the service manifest |
 | `TAILSCALE_LOGIN_SERVER` | — |  | override for self-hosted [Headscale](https://github.com/juanfont/headscale) |
+| `AGENT_DIRECT` | `false` |  | **dev only** — skip Tailscale, serve plain HTTP on a TCP port (see [Local development](#local-development)) |
+| `AGENT_ADVERTISE_HOST` | `host.docker.internal` |  | **dev only** — host the dev server uses to reach this agent in direct mode |
 
 After registration the API key is no longer used — the cached Tailscale
 auth key in `${AGENT_STATE_DIR}/authkey` is sufficient. Wipe the volume
@@ -229,19 +231,53 @@ inference.club issue.
 
 ## Local development
 
+For a fast iteration loop you can run the agent and inference.club **both on
+your own machine, with no Tailscale at all**. The agent runs in *direct mode*
+(`AGENT_DIRECT=1`): instead of joining a tailnet it serves a plain-HTTP `/v1/*`
+surface on a TCP port and tells the local server to reach it directly at
+`host.docker.internal:<port>`. The same LLM services you use in prod work
+unchanged — direct mode only changes how inference.club reaches *this agent*.
+
+```
+your browser ─▶ inference.club (dev, :8101) ─▶ this agent (direct, :8090) ─▶ vLLM / LM Studio / …
+                INFERENCE_DIRECT_AGENTS=True     AGENT_DIRECT=1                 (same as prod)
+```
+
+The dev server must run with `INFERENCE_DIRECT_AGENTS=True` so it trusts the
+address the agent reports and skips Tailscale key minting — inference.club's
+`docker-compose.yml` already sets this.
+
+### With Docker (recommended)
+
+A ready-made [`docker-compose.dev.yml`](./docker-compose.dev.yml) wires all of
+this up — isolated from any production agent on the same box (distinct
+container name, state volume, and host port). It documents the one-time setup
+(create a dev user + DRF API token on your local inference.club, export it as
+`INFERENCE_CLUB_API_KEY`) then:
+
 ```bash
-# build
-go mod tidy
+docker compose -f docker-compose.dev.yml up --build
+```
+
+### Without Docker (bare binary)
+
+```bash
 go build -o inference-club-agent .
 
-# run against a locally-hosted inference.club
-INFERENCE_CLUB_URL=http://localhost:8000 \
-INFERENCE_CLUB_API_KEY=ic_live_xxxxxxxx \
+AGENT_DIRECT=1 \
+INFERENCE_CLUB_URL=http://localhost:8101 \
+INFERENCE_CLUB_API_KEY=<dev DRF token> \
+AGENT_ADVERTISE_HOST=localhost \
+AGENT_LISTEN_PORT=8090 \
 LOCAL_LLM_URL=http://localhost:1234/v1 \
 ./inference-club-agent
 ```
 
-Build the Docker image:
+(Use `AGENT_ADVERTISE_HOST=localhost` when the backend runs on the same host
+*outside* Docker; keep the `host.docker.internal` default when the backend runs
+in a container.)
+
+Build the production Docker image (tailnet mode):
 
 ```bash
 docker build -t inference-club-agent:dev .

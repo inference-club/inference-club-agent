@@ -7,8 +7,11 @@ out/
 *.out
 go.sum
 
-# Local env
+# Local env (real secrets); keep the committed *.example templates
 .env
+.env.*
+!.env.example
+!.env.dev.example
 
 # Operator's real agent.yaml — has LAN IPs and free-form notes that
 # shouldn't be checked in. Use agent.yaml.example as the template.

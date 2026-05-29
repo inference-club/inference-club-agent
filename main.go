@@ -21,9 +21,17 @@
 //	AGENT_NAME               friendly name shown in the inference.club UI (used only when no manifest)
 //	AGENT_HOSTNAME           tailnet hostname (default: club-host-<rand>)
 //	AGENT_STATE_DIR          where to cache tsnet state + authkey (default: /var/lib/club-host)
-//	AGENT_LISTEN_PORT        port inside the tailnet (default: 443)
+//	AGENT_LISTEN_PORT        port to listen on (tailnet mode default: 443; direct mode default: 8080)
 //	AGENT_CONFIG_FILE        path to agent.yaml (default: /etc/inference-club-agent/agent.yaml)
 //	TAILSCALE_LOGIN_SERVER   override for Headscale (default: empty → Tailscale's control plane)
+//
+// Local-dev (no Tailscale) mode — see README "Local development":
+//
+//	AGENT_DIRECT             when truthy, skip Tailscale entirely: serve plain HTTP on a
+//	                         TCP port and tell the server to reach the agent directly.
+//	AGENT_ADVERTISE_HOST     host the dev server uses to reach this agent in direct mode
+//	                         (default: host.docker.internal). Reported to register as the
+//	                         provider's reachable hostname.
 //
 // Subcommands:
 //
@@ -39,6 +47,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -79,22 +88,24 @@ func main() {
 	// that registered with inference.club.
 	applyManifestToConfig(cfg, mf)
 
-	if err := ensureAuthKey(cfg); err != nil {
-		log.Fatalf("registration failed: %v", err)
+	if cfg.Direct {
+		// Direct (no-Tailscale) mode: advertise a routable host:port the
+		// dev server can reach directly (host.docker.internal:<port> by
+		// default). The manifest's tailnet identity (agent.hostname /
+		// agent.listen_port) is deliberately ignored for addressing —
+		// those describe the tailnet listener, which we don't use here.
+		cfg.Hostname = cfg.AdvertiseHost
+		cfg.ListenPort = directListenPort()
+		if err := registerDirect(cfg); err != nil {
+			log.Fatalf("registration failed: %v", err)
+		}
+	} else {
+		if err := ensureAuthKey(cfg); err != nil {
+			log.Fatalf("registration failed: %v", err)
+		}
 	}
 
 	pushManifest(cfg, mf)
-
-	srv := &tsnet.Server{
-		Hostname:  cfg.Hostname,
-		Dir:       cfg.StateDir,
-		AuthKey:   cfg.AuthKey,
-		Ephemeral: false,
-	}
-	if cfg.LoginServer != "" {
-		srv.ControlURL = cfg.LoginServer
-	}
-	defer srv.Close()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -129,17 +140,6 @@ func main() {
 		}
 	}()
 
-	log.Printf("starting tsnet hostname=%q state=%q", cfg.Hostname, cfg.StateDir)
-	if _, err := srv.Up(ctx); err != nil {
-		log.Fatalf("tsnet up: %v", err)
-	}
-
-	listener, err := srv.Listen("tcp", fmt.Sprintf(":%d", cfg.ListenPort))
-	if err != nil {
-		log.Fatalf("listen: %v", err)
-	}
-	defer listener.Close()
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -157,7 +157,40 @@ func main() {
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 
-	log.Printf("serving on tailnet port %d → %s", cfg.ListenPort, cfg.LocalLLMURL)
+	// The listener depends on the mode. Direct mode serves plain HTTP on a
+	// TCP port with no Tailscale involved; tailnet mode brings up tsnet and
+	// listens on the tailnet interface.
+	var listener net.Listener
+	if cfg.Direct {
+		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", cfg.ListenPort))
+		if err != nil {
+			log.Fatalf("listen: %v", err)
+		}
+		log.Printf("serving (direct mode, no tailscale) on :%d → %s", cfg.ListenPort, cfg.LocalLLMURL)
+	} else {
+		srv := &tsnet.Server{
+			Hostname:  cfg.Hostname,
+			Dir:       cfg.StateDir,
+			AuthKey:   cfg.AuthKey,
+			Ephemeral: false,
+		}
+		if cfg.LoginServer != "" {
+			srv.ControlURL = cfg.LoginServer
+		}
+		defer srv.Close()
+
+		log.Printf("starting tsnet hostname=%q state=%q", cfg.Hostname, cfg.StateDir)
+		if _, err := srv.Up(ctx); err != nil {
+			log.Fatalf("tsnet up: %v", err)
+		}
+		listener, err = srv.Listen("tcp", fmt.Sprintf(":%d", cfg.ListenPort))
+		if err != nil {
+			log.Fatalf("listen: %v", err)
+		}
+		log.Printf("serving on tailnet port %d → %s", cfg.ListenPort, cfg.LocalLLMURL)
+	}
+	defer listener.Close()
+
 	go func() {
 		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("serve: %v", err)
@@ -198,6 +231,10 @@ type config struct {
 	LoginServer string
 	ConfigFile  string
 
+	// Direct (no-Tailscale) local-dev mode.
+	Direct        bool
+	AdvertiseHost string
+
 	mu sync.Mutex // guards Name/Hostname/ListenPort under SIGHUP reload
 }
 
@@ -212,6 +249,9 @@ func loadConfig() *config {
 		ListenPort:  443,
 		LoginServer: getenv("TAILSCALE_LOGIN_SERVER", ""),
 		ConfigFile:  getenv("AGENT_CONFIG_FILE", "/etc/inference-club-agent/agent.yaml"),
+
+		Direct:        getenvBool("AGENT_DIRECT"),
+		AdvertiseHost: getenv("AGENT_ADVERTISE_HOST", "host.docker.internal"),
 	}
 	if v := os.Getenv("AGENT_LISTEN_PORT"); v != "" {
 		if _, err := fmt.Sscanf(v, "%d", &c.ListenPort); err != nil {
@@ -226,6 +266,54 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getenvBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// directListenPort is the TCP port the agent serves on in direct (no-Tailscale)
+// mode. AGENT_LISTEN_PORT overrides; otherwise 8080. The manifest's
+// agent.listen_port is intentionally ignored here — it describes the tailnet
+// listener, which direct mode doesn't use.
+func directListenPort() int {
+	v := os.Getenv("AGENT_LISTEN_PORT")
+	if v == "" {
+		return 8080
+	}
+	var p int
+	if _, err := fmt.Sscanf(v, "%d", &p); err != nil || p <= 0 || p > 65535 {
+		log.Fatalf("invalid AGENT_LISTEN_PORT: %q", v)
+	}
+	return p
+}
+
+// registerDirect handles registration in direct (no-Tailscale) mode. It calls
+// the same /agent/register/ endpoint so the server creates/updates the
+// Provider and records the directly-reachable address the agent reports, but
+// it neither needs nor uses a Tailscale auth key. An API key is required — the
+// dev server must know which user this provider belongs to.
+func registerDirect(c *config) error {
+	if c.APIKey == "" {
+		return errors.New("AGENT_DIRECT is set but INFERENCE_CLUB_API_KEY is empty — " +
+			"create a user and API token on your dev inference.club and pass it so the agent can register")
+	}
+	resp, err := register(c)
+	if err != nil {
+		return err
+	}
+	// The dev server (INFERENCE_DIRECT_AGENTS=True) echoes back the address
+	// it stored; trust it so both sides agree on how the agent is reached.
+	if resp.TailnetHostname != "" {
+		c.Hostname = resp.TailnetHostname
+	}
+	log.Printf("registered (direct mode) as provider_id=%d reachable at http://%s:%d/v1",
+		resp.ProviderID, c.Hostname, c.ListenPort)
+	return nil
 }
 
 // ensureAuthKey loads a cached Tailscale auth key from disk, or registers
