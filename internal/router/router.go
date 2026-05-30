@@ -26,10 +26,11 @@ import (
 	"github.com/briancaffey/inference-club-agent/host-agent/internal/manifest"
 )
 
-// MaxCompletionBodyBytes caps how much of an inbound chat-completion body
-// we'll buffer to peek at the "model" field. The bodies we care about
-// (system prompt + user turns) are tiny relative to this; anything larger
-// still gets proxied — just without model-aware routing.
+// MaxCompletionBodyBytes is the initial read-buffer size for an inbound
+// chat-completion body. It's only a starting allocation: readCappedBody
+// drains anything past it too, and we always peek the model from the full
+// body — so large multimodal requests route correctly, they just allocate a
+// bit more. Sized to fit text-only turns without a second read.
 const MaxCompletionBodyBytes = 1 << 20 // 1 MiB
 
 // modelEntry is one item in the OpenAI-format /v1/models response.
@@ -173,7 +174,7 @@ func (r *Router) serveCompletions(w http.ResponseWriter, req *http.Request) {
 	// Read at most MaxCompletionBodyBytes so we can peek at the model
 	// field, then put the bytes back so the proxied request still sees
 	// the original body.
-	body, truncated, err := readCappedBody(req.Body, MaxCompletionBodyBytes)
+	body, _, err := readCappedBody(req.Body, MaxCompletionBodyBytes)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("read request body: %v", err), http.StatusBadRequest)
 		return
@@ -183,15 +184,17 @@ func (r *Router) serveCompletions(w http.ResponseWriter, req *http.Request) {
 	req.ContentLength = int64(len(body))
 	req.Header.Set("X-Inference-Club-Body-Buffered", "1")
 
+	// Peek the model regardless of body size. readCappedBody always returns
+	// the FULL body (it drains everything past the cap), so multimodal
+	// requests — base64 image/audio/video easily exceed 1 MiB — must still
+	// route to the model's backend, not silently fall back.
 	target := r.fallback
-	if !truncated {
-		var probe struct {
-			Model string `json:"model"`
-		}
-		if jerr := json.Unmarshal(body, &probe); jerr == nil && probe.Model != "" {
-			if b, ok := r.byModel[probe.Model]; ok {
-				target = b
-			}
+	var probe struct {
+		Model string `json:"model"`
+	}
+	if jerr := json.Unmarshal(body, &probe); jerr == nil && probe.Model != "" {
+		if b, ok := r.byModel[probe.Model]; ok {
+			target = b
 		}
 	}
 	w.Header().Set("X-Inference-Club-Backend", target.name)

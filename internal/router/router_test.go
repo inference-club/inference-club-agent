@@ -123,6 +123,38 @@ func TestRouter_RoutesByModel(t *testing.T) {
 	}
 }
 
+// A multimodal request (base64 image) easily exceeds the read cap; it must
+// still route to the model's backend, not silently fall back.
+func TestRouter_RoutesLargeMultimodalBody(t *testing.T) {
+	a := newFakeUpstream(t, "a")
+	fallback := newFakeUpstream(t, "fallback")
+	r := New(twoBackendManifest(a.URL().String(), "http://unused.invalid/v1"), fallback.URL())
+
+	bigImage := strings.Repeat("A", 2<<20) // ~2 MiB, well past MaxCompletionBodyBytes
+	body := fmt.Sprintf(
+		`{"model":"model-a","messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]}]}`,
+		bigImage,
+	)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if len(a.calls) != 1 {
+		t.Fatalf("expected the large request to route to backend a, got a=%d fallback=%d",
+			len(a.calls), len(fallback.calls))
+	}
+	if len(fallback.calls) != 0 {
+		t.Fatalf("large request wrongly hit the fallback: %d call(s)", len(fallback.calls))
+	}
+	if a.calls[0].body != body {
+		t.Errorf("forwarded body was altered/truncated (len got=%d want=%d)", len(a.calls[0].body), len(body))
+	}
+}
+
 func TestRouter_RewritesPath_NoV1V1(t *testing.T) {
 	a := newFakeUpstream(t, "a")
 	fallback := newFakeUpstream(t, "fallback")
