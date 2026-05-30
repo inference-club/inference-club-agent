@@ -89,9 +89,26 @@ type Service struct {
 	Extra   map[string]string `yaml:"extra,omitempty" json:"extra,omitempty"`
 }
 
-// Model is the OpenAI-compatible model id the service serves.
+// Model is one model a service serves.
+//
+//   - ID is the *served* id — the exact string the backend (vLLM et al.)
+//     answers to, used for routing.
+//   - Hf is the HuggingFace repo id (e.g. "Qwen/Qwen3-30B-A3B"). It gives the
+//     model its canonical identity on inference.club, which pools the same
+//     model across providers. When ID is omitted the served id defaults to the
+//     HF id (vLLM serves under the HF id unless --served-model-name is set).
 type Model struct {
-	ID string `yaml:"id" json:"id"`
+	ID string `yaml:"id,omitempty" json:"id,omitempty"`
+	Hf string `yaml:"hf,omitempty" json:"hf,omitempty"`
+}
+
+// ServedID is the id the backend answers to: the explicit ID, or the HF id
+// when ID is omitted. Mirrors the server's _model_served_id.
+func (m Model) ServedID() string {
+	if strings.TrimSpace(m.ID) != "" {
+		return strings.TrimSpace(m.ID)
+	}
+	return strings.TrimSpace(m.Hf)
 }
 
 // LoadResult bundles the parsed manifest with the raw YAML bytes — the

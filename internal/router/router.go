@@ -97,16 +97,17 @@ func New(m *manifest.Manifest, fallbackURL *url.URL) *Router {
 					r.backends = append(r.backends, b)
 				}
 				for _, m := range svc.Models {
-					if m.ID == "" {
+					served := m.ServedID()
+					if served == "" {
 						continue
 					}
-					if _, dup := seenModels[m.ID]; dup {
+					if _, dup := seenModels[served]; dup {
 						continue
 					}
-					seenModels[m.ID] = struct{}{}
-					r.byModel[m.ID] = b
+					seenModels[served] = struct{}{}
+					r.byModel[served] = b
 					r.manifestData.Data = append(r.manifestData.Data, modelEntry{
-						ID: m.ID, Object: "model", Created: now, OwnedBy: svc.Name,
+						ID: served, Object: "model", Created: now, OwnedBy: svc.Name,
 					})
 				}
 			}
