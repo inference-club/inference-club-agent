@@ -65,9 +65,10 @@ type backend struct {
 // Router and atomically swap it in (see main.go).
 type Router struct {
 	fallback     *backend
-	backends     []*backend         // ordered, deduped by URL
+	backends     []*backend // ordered, deduped by URL
 	byModel      map[string]*backend
-	manifestData modelsResponse     // pre-built /v1/models payload
+	byType       map[string]*backend // service type ("stt"/"tts") → first backend
+	manifestData modelsResponse      // pre-built /v1/models payload
 }
 
 // New builds a Router with no probe data — context lengths are unknown and
@@ -85,6 +86,7 @@ func NewWithProbe(m *manifest.Manifest, fallbackURL *url.URL, ctxLens map[string
 	r := &Router{
 		fallback: newBackend("fallback", fallbackURL),
 		byModel:  map[string]*backend{},
+		byType:   map[string]*backend{},
 	}
 
 	// Aggregate models response from manifest declarations. Dedupe model
@@ -108,6 +110,14 @@ func NewWithProbe(m *manifest.Manifest, fallbackURL *url.URL, ctxLens map[string
 					b = newBackend(svc.Name, bURL)
 					urlToBackend[key] = b
 					r.backends = append(r.backends, b)
+				}
+				// First backend of each non-LLM type wins. STT (and later
+				// TTS) endpoints route by type, not by model: the request is
+				// multipart, so we don't peek a JSON model field.
+				if st := svc.ServiceType(); st != "llm" {
+					if _, seen := r.byType[st]; !seen {
+						r.byType[st] = b
+					}
 				}
 				for _, m := range svc.Models {
 					served := m.ServedID()
@@ -210,6 +220,10 @@ func newBackend(name string, target *url.URL) *backend {
 //   - GET /v1/models → assembled from the manifest (no upstream call).
 //   - POST /v1/chat/completions or /v1/completions → backend that owns
 //     the requested model, or the fallback if the model isn't declared.
+//   - POST /v1/audio/transcriptions → the STT-typed backend (multipart is
+//     streamed through untouched), or the fallback if none is declared.
+//   - POST /v1/images/generations|edits → the image-typed backend (JSON or
+//     multipart streamed through), or the fallback if none is declared.
 //   - everything else under /v1/ → the fallback.
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	switch {
@@ -217,9 +231,27 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		r.serveModels(w, req)
 	case req.Method == http.MethodPost && (req.URL.Path == "/v1/chat/completions" || req.URL.Path == "/v1/completions"):
 		r.serveCompletions(w, req)
+	case req.Method == http.MethodPost && req.URL.Path == "/v1/audio/transcriptions":
+		r.serveByType(w, req, "stt")
+	case req.Method == http.MethodPost &&
+		(req.URL.Path == "/v1/images/generations" || req.URL.Path == "/v1/images/edits"):
+		r.serveByType(w, req, "image")
 	default:
 		r.fallback.proxy.ServeHTTP(w, req)
 	}
+}
+
+// serveByType forwards a request to the first backend of the given service
+// type, streaming the body through untouched (important: transcription bodies
+// are multipart audio uploads that can be large — we never buffer them).
+// Falls back to the env upstream when no service of that type is declared.
+func (r *Router) serveByType(w http.ResponseWriter, req *http.Request, serviceType string) {
+	target := r.fallback
+	if b, ok := r.byType[serviceType]; ok {
+		target = b
+	}
+	w.Header().Set("X-Inference-Club-Backend", target.name)
+	target.proxy.ServeHTTP(w, req)
 }
 
 func (r *Router) serveModels(w http.ResponseWriter, _ *http.Request) {

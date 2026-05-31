@@ -42,6 +42,11 @@ var (
 		"vllm": {}, "lmstudio": {}, "ollama": {}, "sglang": {},
 		"llamacpp": {}, "tgi": {}, "other": {},
 	}
+	// serviceTypes is the *what* a service provides, orthogonal to engine.
+	// Defaults to "llm" when omitted, so pre-existing manifests stay valid.
+	serviceTypes = map[string]struct{}{
+		"llm": {}, "stt": {}, "tts": {}, "image": {},
+	}
 )
 
 // Manifest is the root document.
@@ -51,7 +56,7 @@ type Manifest struct {
 	Hosts         []Host `yaml:"hosts" json:"hosts"`
 }
 
-// Agent identifies this agent to inference.club. ``Name`` is also the
+// Agent identifies this agent to inference.club. “Name“ is also the
 // lookup key the server uses to bind a manifest to a Provider row.
 type Agent struct {
 	Name       string `yaml:"name" json:"name"`
@@ -78,15 +83,32 @@ type GPU struct {
 	Count  int     `yaml:"count,omitempty" json:"count,omitempty"`
 }
 
-// Service is one LLM inference endpoint running on a Host. ``Name`` doubles
-// as the router-key for the multi-backend router (see the agent ROADMAP).
+// Service is one OpenAI-compatible inference endpoint running on a Host.
+// “Name“ doubles as the router-key for the multi-backend router (see the
+// agent ROADMAP).
 type Service struct {
-	Name    string            `yaml:"name" json:"name"`
-	Engine  string            `yaml:"engine" json:"engine"`
-	URL     string            `yaml:"url" json:"url"`
-	Models  []Model           `yaml:"models,omitempty" json:"models,omitempty"`
-	Command string            `yaml:"command,omitempty" json:"command,omitempty"`
-	Extra   map[string]string `yaml:"extra,omitempty" json:"extra,omitempty"`
+	Name string `yaml:"name" json:"name"`
+	// Type is what the service provides: "llm" (default), "stt", or "tts".
+	// Drives which /v1 endpoint the router forwards here.
+	Type string `yaml:"type,omitempty" json:"type,omitempty"`
+	// Features are operator-declared capabilities of THIS deployment, e.g.
+	// ["timestamps"] for an STT service launched with a ForcedAligner so
+	// verbose_json returns word timings. Per-deployment, because the same
+	// model may or may not expose a feature depending on how it was served.
+	Features []string          `yaml:"features,omitempty" json:"features,omitempty"`
+	Engine   string            `yaml:"engine" json:"engine"`
+	URL      string            `yaml:"url" json:"url"`
+	Models   []Model           `yaml:"models,omitempty" json:"models,omitempty"`
+	Command  string            `yaml:"command,omitempty" json:"command,omitempty"`
+	Extra    map[string]string `yaml:"extra,omitempty" json:"extra,omitempty"`
+}
+
+// ServiceType returns the declared type, defaulting to "llm" when omitted.
+func (s Service) ServiceType() string {
+	if t := strings.TrimSpace(s.Type); t != "" {
+		return t
+	}
+	return "llm"
 }
 
 // Model is one model a service serves.
@@ -120,7 +142,7 @@ type LoadResult struct {
 
 // Load reads, parses, and validates a manifest from disk. Returns the
 // parsed manifest, the raw bytes, and any validation errors. A non-nil
-// LoadResult means the file parsed; ``errs`` may still be non-empty if
+// LoadResult means the file parsed; “errs“ may still be non-empty if
 // validation failed.
 func Load(path string) (*LoadResult, []string, error) {
 	raw, err := os.ReadFile(path)
@@ -160,7 +182,7 @@ func (m *Manifest) AsJSONMap() (map[string]any, error) {
 // of fix-one-find-next.
 //
 // Mirrors the server-side validator in
-// ``apps/inference/manifest_validator.py``. Keep them in sync.
+// “apps/inference/manifest_validator.py“. Keep them in sync.
 func Validate(m *Manifest) []string {
 	if m == nil {
 		return []string{"manifest is nil"}
@@ -257,6 +279,26 @@ func Validate(m *Manifest) []string {
 					"%s.engine: must be one of [llamacpp lmstudio ollama other sglang tgi vllm], got %q",
 					sp, s.Engine,
 				))
+			}
+
+			// type is optional and defaults to "llm"; only an explicit
+			// out-of-set value is an error.
+			if s.Type != "" {
+				if _, ok := serviceTypes[s.Type]; !ok {
+					errs = append(errs, fmt.Sprintf(
+						"%s.type: must be one of [image llm stt tts], got %q", sp, s.Type,
+					))
+				}
+			}
+
+			// features is an optional, free-form capability list (e.g.
+			// "timestamps"). YAML already enforces []string; just bound each.
+			for fi, f := range s.Features {
+				if len(f) > MaxStringLen {
+					errs = append(errs, fmt.Sprintf(
+						"%s.features[%d]: exceeds %d chars", sp, fi, MaxStringLen,
+					))
+				}
 			}
 
 			if strings.TrimSpace(s.URL) == "" {

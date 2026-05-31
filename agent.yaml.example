@@ -35,6 +35,7 @@ hosts:
     services:
       - name: rtx-4090-vllm     # must be unique across the whole manifest
         engine: vllm            # vllm | lmstudio | ollama | sglang | llamacpp | tgi | other
+        # type: llm             # llm (default) | stt | tts — what the service provides
         url: http://192.168.1.10:8000/v1
         models:
           - id: qwen3-30b-a3b
@@ -42,6 +43,26 @@ hosts:
         command: >              # optional, free-form, for display
           vllm serve Qwen/Qwen3-30B-A3B
           --tensor-parallel-size 1 --max-model-len 32768
+
+      - name: rtx-4090-asr      # a speech-to-text (ASR) service
+        type: stt               # routes /v1/audio/transcriptions here
+        engine: vllm
+        url: http://192.168.1.10:8001/v1
+        # Declare per-deployment capabilities. Add `timestamps` ONLY if this
+        # server returns real word/segment timings via verbose_json — e.g.
+        # Qwen3-ASR served with its ForcedAligner, or a Whisper server. A plain
+        # `vllm serve Qwen/Qwen3-ASR-1.7B` does NOT, so leave it off there.
+        # features: [timestamps]
+        models:
+          - id: Qwen/Qwen3-ASR-1.7B
+            hf: Qwen/Qwen3-ASR-1.7B
+
+      - name: rtx-4090-images   # an image-generation service
+        type: image             # routes /v1/images/generations and /edits here
+        engine: other
+        url: http://192.168.1.10:8002/v1
+        models:
+          - id: my-image-model
 
   - id: mac-studio
     address: 192.168.1.20

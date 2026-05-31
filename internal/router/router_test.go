@@ -156,6 +156,105 @@ func TestRouter_RoutesLargeMultimodalBody(t *testing.T) {
 	}
 }
 
+// sttManifest builds a manifest with one LLM service and one STT service on
+// separate backends.
+func sttManifest(llmURL, sttURL string) *manifest.Manifest {
+	return &manifest.Manifest{
+		SchemaVersion: 1,
+		Agent:         manifest.Agent{Name: "club-host"},
+		Hosts: []manifest.Host{{
+			ID: "rig-a",
+			Services: []manifest.Service{
+				{Name: "vllm", Engine: "vllm", URL: llmURL, Models: []manifest.Model{{ID: "model-a"}}},
+				{Name: "asr", Type: "stt", Engine: "vllm", URL: sttURL, Models: []manifest.Model{{ID: "whisper-1"}}},
+			},
+		}},
+	}
+}
+
+// A transcription request must stream to the STT backend, not the LLM one or
+// the fallback.
+func TestRouter_RoutesTranscriptionToSTTBackend(t *testing.T) {
+	llm := newFakeUpstream(t, "llm")
+	stt := newFakeUpstream(t, "stt")
+	fallback := newFakeUpstream(t, "fallback")
+	r := New(sttManifest(llm.URL().String(), stt.URL().String()), fallback.URL())
+
+	body := "--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n--b--\r\n"
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if len(stt.calls) != 1 {
+		t.Fatalf("expected 1 call to STT backend, got %d", len(stt.calls))
+	}
+	if stt.calls[0].path != "/v1/audio/transcriptions" {
+		t.Errorf("STT upstream path = %q, want /v1/audio/transcriptions", stt.calls[0].path)
+	}
+	for _, other := range []*fakeUpstream{llm, fallback} {
+		if len(other.calls) != 0 {
+			t.Fatalf("transcription wrongly hit %s: %+v", other.name, other.calls)
+		}
+	}
+}
+
+// With no STT service declared, transcription falls back to the env upstream
+// rather than 404ing — mirrors the model-routing fallback.
+func TestRouter_TranscriptionFallsBackWhenNoSTT(t *testing.T) {
+	llm := newFakeUpstream(t, "llm")
+	fallback := newFakeUpstream(t, "fallback")
+	r := New(twoBackendManifest(llm.URL().String(), "http://unused.invalid/v1"), fallback.URL())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", strings.NewReader("x"))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if len(fallback.calls) != 1 {
+		t.Fatalf("expected fallback to serve transcription, got %d call(s)", len(fallback.calls))
+	}
+}
+
+// Image generations + edits must route to the image-typed backend.
+func TestRouter_RoutesImagesToImageBackend(t *testing.T) {
+	llm := newFakeUpstream(t, "llm")
+	img := newFakeUpstream(t, "img")
+	fallback := newFakeUpstream(t, "fallback")
+	m := &manifest.Manifest{
+		SchemaVersion: 1,
+		Agent:         manifest.Agent{Name: "club-host"},
+		Hosts: []manifest.Host{{
+			ID: "rig-a",
+			Services: []manifest.Service{
+				{Name: "vllm", Engine: "vllm", URL: llm.URL().String(), Models: []manifest.Model{{ID: "model-a"}}},
+				{Name: "imgsvc", Type: "image", Engine: "other", URL: img.URL().String(), Models: []manifest.Model{{ID: "sdxl"}}},
+			},
+		}},
+	}
+	r := New(m, fallback.URL())
+
+	for _, path := range []string{"/v1/images/generations", "/v1/images/edits"} {
+		img.calls = nil
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"prompt":"x"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", path, w.Code)
+		}
+		if len(img.calls) != 1 || img.calls[0].path != path {
+			t.Fatalf("%s did not route to image backend: %+v", path, img.calls)
+		}
+	}
+	if len(llm.calls) != 0 || len(fallback.calls) != 0 {
+		t.Fatalf("image requests leaked to llm=%d fallback=%d", len(llm.calls), len(fallback.calls))
+	}
+}
+
 func TestNewWithProbe_SetsMaxModelLen(t *testing.T) {
 	a := newFakeUpstream(t, "a")
 	b := newFakeUpstream(t, "b")
@@ -412,4 +511,3 @@ func TestRouter_TruncatedBodyFallsBackSafely(t *testing.T) {
 			len(fallback.calls[0].body), len(body))
 	}
 }
-
