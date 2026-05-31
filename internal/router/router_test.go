@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/briancaffey/inference-club-agent/host-agent/internal/manifest"
 )
@@ -152,6 +153,74 @@ func TestRouter_RoutesLargeMultimodalBody(t *testing.T) {
 	}
 	if a.calls[0].body != body {
 		t.Errorf("forwarded body was altered/truncated (len got=%d want=%d)", len(a.calls[0].body), len(body))
+	}
+}
+
+func TestNewWithProbe_SetsMaxModelLen(t *testing.T) {
+	a := newFakeUpstream(t, "a")
+	b := newFakeUpstream(t, "b")
+	fallback := newFakeUpstream(t, "fallback")
+	r := NewWithProbe(
+		twoBackendManifest(a.URL().String(), b.URL().String()),
+		fallback.URL(),
+		map[string]int{"model-a": 10000},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	var got modelsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v\nbody=%s", err, w.Body.String())
+	}
+	byID := map[string]*int{}
+	for i := range got.Data {
+		byID[got.Data[i].ID] = got.Data[i].MaxModelLen
+	}
+	if byID["model-a"] == nil || *byID["model-a"] != 10000 {
+		t.Errorf("model-a max_model_len = %v, want 10000", byID["model-a"])
+	}
+	if byID["model-b"] != nil {
+		t.Errorf("model-b max_model_len = %v, want nil (not probed)", *byID["model-b"])
+	}
+}
+
+func TestProbeContextLengths(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/v1/models" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-a","max_model_len":10000},{"id":"no-len"}]}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	m := &manifest.Manifest{
+		SchemaVersion: 1,
+		Hosts: []manifest.Host{{ID: "h", Services: []manifest.Service{{
+			Name: "vllm", Engine: "vllm", URL: srv.URL + "/v1",
+			Models: []manifest.Model{{ID: "model-a"}},
+		}}}},
+	}
+	got := ProbeContextLengths(m, 2*time.Second)
+	if got["model-a"] != 10000 {
+		t.Errorf("model-a = %d, want 10000", got["model-a"])
+	}
+	if _, ok := got["no-len"]; ok {
+		t.Errorf("entry without max_model_len should be absent, got %d", got["no-len"])
+	}
+}
+
+func TestProbeContextLengths_UnreachableIsSafe(t *testing.T) {
+	m := &manifest.Manifest{
+		Hosts: []manifest.Host{{ID: "h", Services: []manifest.Service{{
+			Name: "x", URL: "http://127.0.0.1:1/v1", Models: []manifest.Model{{ID: "m"}},
+		}}}},
+	}
+	got := ProbeContextLengths(m, 500*time.Millisecond)
+	if len(got) != 0 {
+		t.Errorf("expected empty map for an unreachable upstream, got %v", got)
 	}
 }
 

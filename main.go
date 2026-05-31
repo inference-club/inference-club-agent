@@ -115,7 +115,7 @@ func main() {
 		log.Fatalf("invalid LOCAL_LLM_URL: %v", err)
 	}
 	var routerHolder atomic.Pointer[router.Router]
-	routerHolder.Store(router.New(mf.Manifest, target))
+	routerHolder.Store(buildRouter(mf.Manifest, target))
 	logRouterBackends("initial", routerHolder.Load(), cfg.LocalLLMURL)
 
 	// SIGHUP → reload + revalidate + reupload the manifest, then rebuild
@@ -135,7 +135,7 @@ func main() {
 				continue
 			}
 			pushManifest(cfg, newMF)
-			routerHolder.Store(router.New(newMF.Manifest, target))
+			routerHolder.Store(buildRouter(newMF.Manifest, target))
 			logRouterBackends("reloaded", routerHolder.Load(), cfg.LocalLLMURL)
 		}
 	}()
@@ -202,6 +202,14 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
+}
+
+// buildRouter probes each upstream for its served context window (best-effort,
+// short timeout) and constructs the model→backend router with that data baked
+// into /v1/models. Called at startup and on every SIGHUP reload.
+func buildRouter(m *manifest.Manifest, fallback *url.URL) *router.Router {
+	ctxLens := router.ProbeContextLengths(m, 4*time.Second)
+	return router.NewWithProbe(m, fallback, ctxLens)
 }
 
 // logRouterBackends prints the per-backend / per-model routing the agent

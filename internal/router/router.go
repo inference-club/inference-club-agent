@@ -39,6 +39,10 @@ type modelEntry struct {
 	Object  string `json:"object"`
 	Created int64  `json:"created"`
 	OwnedBy string `json:"owned_by"`
+	// MaxModelLen is the served context window, probed from the upstream's
+	// /v1/models (vLLM reports it). Omitted when unknown so the server can
+	// fall back to other sources.
+	MaxModelLen *int `json:"max_model_len,omitempty"`
 }
 
 type modelsResponse struct {
@@ -66,10 +70,18 @@ type Router struct {
 	manifestData modelsResponse     // pre-built /v1/models payload
 }
 
-// New builds a Router from a manifest and a fallback upstream URL. The
-// fallback handles unknown models, the synthesized-from-env manifest
-// case, and any /v1/* path other than chat/completions/models.
+// New builds a Router with no probe data — context lengths are unknown and
+// omitted from /v1/models. Kept pure (no network) so startup and tests don't
+// block on upstreams.
 func New(m *manifest.Manifest, fallbackURL *url.URL) *Router {
+	return NewWithProbe(m, fallbackURL, nil)
+}
+
+// NewWithProbe is New plus a map of served model id → max context length
+// (from ProbeContextLengths), surfaced as max_model_len in /v1/models. A nil
+// map or missing entry simply omits the field, leaving the server to fall
+// back to the HuggingFace value or blank.
+func NewWithProbe(m *manifest.Manifest, fallbackURL *url.URL, ctxLens map[string]int) *Router {
 	r := &Router{
 		fallback: newBackend("fallback", fallbackURL),
 		byModel:  map[string]*backend{},
@@ -107,14 +119,68 @@ func New(m *manifest.Manifest, fallbackURL *url.URL) *Router {
 					}
 					seenModels[served] = struct{}{}
 					r.byModel[served] = b
-					r.manifestData.Data = append(r.manifestData.Data, modelEntry{
-						ID: served, Object: "model", Created: now, OwnedBy: svc.Name,
-					})
+					entry := modelEntry{ID: served, Object: "model", Created: now, OwnedBy: svc.Name}
+					if n, ok := ctxLens[served]; ok && n > 0 {
+						v := n
+						entry.MaxModelLen = &v
+					}
+					r.manifestData.Data = append(r.manifestData.Data, entry)
 				}
 			}
 		}
 	}
 	return r
+}
+
+// ProbeContextLengths asks each upstream's /v1/models for its served context
+// window (vLLM reports it as max_model_len) and returns served-id → length.
+// Best-effort: unreachable servers, non-200s, missing fields, and parse
+// errors are skipped (and just absent from the map), so the caller always
+// gets a usable result and never blocks beyond `timeout` per upstream.
+func ProbeContextLengths(m *manifest.Manifest, timeout time.Duration) map[string]int {
+	out := map[string]int{}
+	if m == nil {
+		return out
+	}
+	client := &http.Client{Timeout: timeout}
+	seenURL := map[string]bool{}
+	for _, h := range m.Hosts {
+		for _, svc := range h.Services {
+			if svc.URL == "" || seenURL[svc.URL] {
+				continue
+			}
+			seenURL[svc.URL] = true
+			endpoint := strings.TrimSuffix(svc.URL, "/") + "/models"
+			resp, err := client.Get(endpoint)
+			if err != nil {
+				log.Printf("probe %s: %v (context length unknown)", endpoint, err)
+				continue
+			}
+			func() {
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					log.Printf("probe %s: HTTP %d (context length unknown)", endpoint, resp.StatusCode)
+					return
+				}
+				var body struct {
+					Data []struct {
+						ID          string `json:"id"`
+						MaxModelLen *int   `json:"max_model_len"`
+					} `json:"data"`
+				}
+				if jerr := json.NewDecoder(resp.Body).Decode(&body); jerr != nil {
+					log.Printf("probe %s: decode: %v", endpoint, jerr)
+					return
+				}
+				for _, d := range body.Data {
+					if d.MaxModelLen != nil && *d.MaxModelLen > 0 {
+						out[d.ID] = *d.MaxModelLen
+					}
+				}
+			}()
+		}
+	}
+	return out
 }
 
 // newBackend builds a reverse proxy for one upstream URL with the same

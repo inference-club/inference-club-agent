@@ -1,0 +1,56 @@
+# Production stack for the agent — joins inference.club over Tailscale.
+#
+# This is the real deployment: the agent registers with the live
+# inference.club, joins its private tailnet via embedded tsnet, and
+# reverse-proxies an OpenAI-compatible /v1/* surface to your local LLM(s).
+# No published host ports — it's reachable only over the tailnet.
+#
+# For the no-Tailscale local development loop, use docker-compose.dev.yml
+# instead. The two are fully isolated: different container name, different
+# state volume, and this one reads your PROD token from .env (not .env.dev).
+#
+# ── Secrets ──────────────────────────────────────────────────────────────────
+#   Your prod inference.club API key lives in .env (gitignored) as
+#   INFERENCE_CLUB_API_KEY. It's only needed for the very first registration;
+#   afterwards the cached Tailscale identity in the state volume is sufficient.
+#
+# ── Run ──────────────────────────────────────────────────────────────────────
+#   docker compose up -d --build
+#
+# ── Refresh after editing agent.yaml ─────────────────────────────────────────
+#   docker kill -s HUP club-host           # reload + re-upload the manifest
+#   docker exec club-host host-agent doctor # validate + probe service URLs
+services:
+  club-host:
+    build:
+      context: .
+    # Once the prebuilt image is published you can drop `build:` above and
+    # use the published image directly:
+    #   image: ghcr.io/briancaffey/inference-club-agent:latest
+    image: inference-club-agent:latest
+    container_name: club-host
+    restart: unless-stopped
+    # Prod secrets + config from .env (gitignored): INFERENCE_CLUB_API_KEY,
+    # LOCAL_LLM_URL, INFERENCE_CLUB_URL, AGENT_HOSTNAME, … Do NOT also set
+    # these under `environment:` — that would override env_file.
+    env_file:
+      - .env
+    volumes:
+      # Persists the tsnet state + cached Tailscale auth key across restarts,
+      # so the agent re-uses its identity instead of re-registering.
+      - club-host-state:/var/lib/club-host
+      # The service manifest — uploaded to inference.club on startup and on
+      # SIGHUP. agent.name in it must match the registered Provider name.
+      - ./agent.yaml:/etc/inference-club-agent/agent.yaml:ro
+    extra_hosts:
+      # Lets the container resolve the host on Linux too (auto on Docker
+      # Desktop for Mac/Windows).
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  club-host-state:
+    # Pin the exact volume name (no project prefix) so this reuses an existing
+    # `club-host-state` volume — preserving the agent's Tailscale identity
+    # across a `docker run` → compose migration. Compose creates it if absent,
+    # so fresh installs work too.
+    name: club-host-state
