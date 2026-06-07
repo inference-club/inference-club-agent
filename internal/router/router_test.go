@@ -255,6 +255,47 @@ func TestRouter_RoutesImagesToImageBackend(t *testing.T) {
 	}
 }
 
+// TTS synthesize + list_voices must route to the tts-typed backend.
+func TestRouter_RoutesTtsToTtsBackend(t *testing.T) {
+	llm := newFakeUpstream(t, "llm")
+	tts := newFakeUpstream(t, "tts")
+	fallback := newFakeUpstream(t, "fallback")
+	m := &manifest.Manifest{
+		SchemaVersion: 1,
+		Agent:         manifest.Agent{Name: "club-host"},
+		Hosts: []manifest.Host{{
+			ID: "rig-a",
+			Services: []manifest.Service{
+				{Name: "vllm", Engine: "vllm", URL: llm.URL().String(), Models: []manifest.Model{{ID: "model-a"}}},
+				{Name: "riva", Type: "tts", Engine: "other", URL: tts.URL().String(), Models: []manifest.Model{{ID: "magpie"}}},
+			},
+		}},
+	}
+	r := New(m, fallback.URL())
+
+	cases := []struct {
+		method, path string
+	}{
+		{http.MethodPost, "/v1/audio/synthesize"},
+		{http.MethodGet, "/v1/audio/list_voices"},
+	}
+	for _, tc := range cases {
+		tts.calls = nil
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(""))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", tc.path, w.Code)
+		}
+		if len(tts.calls) != 1 || tts.calls[0].path != tc.path {
+			t.Fatalf("%s did not route to tts backend: %+v", tc.path, tts.calls)
+		}
+	}
+	if len(llm.calls) != 0 || len(fallback.calls) != 0 {
+		t.Fatalf("tts requests leaked to llm=%d fallback=%d", len(llm.calls), len(fallback.calls))
+	}
+}
+
 func TestNewWithProbe_SetsMaxModelLen(t *testing.T) {
 	a := newFakeUpstream(t, "a")
 	b := newFakeUpstream(t, "b")

@@ -100,7 +100,13 @@ type Service struct {
 	URL      string            `yaml:"url" json:"url"`
 	Models   []Model           `yaml:"models,omitempty" json:"models,omitempty"`
 	Command  string            `yaml:"command,omitempty" json:"command,omitempty"`
-	Extra    map[string]string `yaml:"extra,omitempty" json:"extra,omitempty"`
+	// APIKey, when set, is sent as `Authorization: Bearer <key>` on every
+	// request the router proxies to this service's URL — e.g. an LM Studio or
+	// vLLM server started with an API key. It is a LOCAL-ONLY secret: it is
+	// excluded from JSON (`json:"-"`) and stripped from the manifest before
+	// upload (see Redacted), so it NEVER reaches inference.club.
+	APIKey string            `yaml:"api_key,omitempty" json:"-"`
+	Extra  map[string]string `yaml:"extra,omitempty" json:"extra,omitempty"`
 }
 
 // ServiceType returns the declared type, defaulting to "llm" when omitted.
@@ -161,6 +167,49 @@ func Load(path string) (*LoadResult, []string, error) {
 	}
 	errs := Validate(&m)
 	return &LoadResult{Manifest: &m, Raw: raw}, errs, nil
+}
+
+// Redacted returns a copy of the manifest with every per-service api_key
+// cleared, so the secret never leaves the agent. Only the Services slices are
+// deep-copied (that's all we mutate); everything else is shared by reference,
+// which is safe because callers only read the result (to marshal it).
+func (m *Manifest) Redacted() *Manifest {
+	if m == nil {
+		return nil
+	}
+	cp := *m
+	cp.Hosts = make([]Host, len(m.Hosts))
+	for i, h := range m.Hosts {
+		if len(h.Services) > 0 {
+			svcs := make([]Service, len(h.Services))
+			copy(svcs, h.Services)
+			for j := range svcs {
+				svcs[j].APIKey = ""
+			}
+			h.Services = svcs
+		}
+		cp.Hosts[i] = h
+	}
+	return &cp
+}
+
+// RedactedForUpload returns the manifest's raw YAML and parsed JSON map with
+// all per-service api_keys stripped — the exact bytes/struct safe to send to
+// inference.club. We re-marshal the redacted manifest rather than forwarding
+// the operator's literal file so a secret can never ride along in raw_yaml.
+// Tradeoff: the server-stored YAML is normalized (comments/formatting dropped);
+// the operator's local agent.yaml is untouched.
+func (m *Manifest) RedactedForUpload() (rawYAML []byte, parsed map[string]any, err error) {
+	red := m.Redacted()
+	rawYAML, err = yaml.Marshal(red)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal redacted manifest: %w", err)
+	}
+	parsed, err = red.AsJSONMap()
+	if err != nil {
+		return nil, nil, err
+	}
+	return rawYAML, parsed, nil
 }
 
 // AsJSONMap converts the manifest to a generic map[string]any so we can
@@ -313,6 +362,12 @@ func Validate(m *Manifest) []string {
 			if len(s.Command) > MaxStringLen {
 				errs = append(errs, fmt.Sprintf(
 					"%s.command: exceeds %d chars", sp, MaxStringLen,
+				))
+			}
+
+			if len(s.APIKey) > MaxStringLen {
+				errs = append(errs, fmt.Sprintf(
+					"%s.api_key: exceeds %d chars", sp, MaxStringLen,
 				))
 			}
 		}

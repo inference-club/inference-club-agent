@@ -58,6 +58,7 @@ type backend struct {
 	target *url.URL
 	proxy  *httputil.ReverseProxy
 	name   string // first service.name we saw for this URL — used in logs
+	apiKey string // optional; sent as Authorization: Bearer on proxied requests
 }
 
 // Router is the http.Handler that fronts the agent's tailnet listener.
@@ -84,7 +85,7 @@ func New(m *manifest.Manifest, fallbackURL *url.URL) *Router {
 // back to the HuggingFace value or blank.
 func NewWithProbe(m *manifest.Manifest, fallbackURL *url.URL, ctxLens map[string]int) *Router {
 	r := &Router{
-		fallback: newBackend("fallback", fallbackURL),
+		fallback: newBackend("fallback", fallbackURL, ""),
 		byModel:  map[string]*backend{},
 		byType:   map[string]*backend{},
 	}
@@ -107,7 +108,7 @@ func NewWithProbe(m *manifest.Manifest, fallbackURL *url.URL, ctxLens map[string
 				key := bURL.String()
 				b, ok := urlToBackend[key]
 				if !ok {
-					b = newBackend(svc.Name, bURL)
+					b = newBackend(svc.Name, bURL, svc.APIKey)
 					urlToBackend[key] = b
 					r.backends = append(r.backends, b)
 				}
@@ -161,7 +162,11 @@ func ProbeContextLengths(m *manifest.Manifest, timeout time.Duration) map[string
 			}
 			seenURL[svc.URL] = true
 			endpoint := strings.TrimSuffix(svc.URL, "/") + "/models"
-			resp, err := client.Get(endpoint)
+			req, _ := http.NewRequest(http.MethodGet, endpoint, nil)
+			if svc.APIKey != "" {
+				req.Header.Set("Authorization", "Bearer "+svc.APIKey)
+			}
+			resp, err := client.Do(req)
 			if err != nil {
 				log.Printf("probe %s: %v (context length unknown)", endpoint, err)
 				continue
@@ -195,7 +200,7 @@ func ProbeContextLengths(m *manifest.Manifest, timeout time.Duration) map[string
 
 // newBackend builds a reverse proxy for one upstream URL with the same
 // path-rewrite + flushing semantics the agent has used since 005355e.
-func newBackend(name string, target *url.URL) *backend {
+func newBackend(name string, target *url.URL, apiKey string) *backend {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	defaultDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
@@ -207,13 +212,20 @@ func newBackend(name string, target *url.URL) *backend {
 		req.URL.Path = strings.TrimSuffix(target.Path, "/") + strings.TrimPrefix(origPath, "/v1")
 		req.Host = target.Host
 		req.Header.Set("X-Forwarded-Host", target.Host)
+		// When the operator configured an api_key for this backend, the agent
+		// authenticates to it with that key — overriding any inbound
+		// Authorization (which carries the consumer's inference.club credential,
+		// not the backend's). When unset, the inbound header is left untouched.
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 	}
 	proxy.FlushInterval = -1
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		log.Printf("proxy %s error: %v", name, err)
 		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
 	}
-	return &backend{target: target, proxy: proxy, name: name}
+	return &backend{target: target, proxy: proxy, name: name, apiKey: apiKey}
 }
 
 // ServeHTTP dispatches to the right upstream:
@@ -224,6 +236,8 @@ func newBackend(name string, target *url.URL) *backend {
 //     streamed through untouched), or the fallback if none is declared.
 //   - POST /v1/images/generations|edits → the image-typed backend (JSON or
 //     multipart streamed through), or the fallback if none is declared.
+//   - /v1/audio/synthesize | /v1/audio/list_voices → the tts-typed backend
+//     (the NVIDIA Riva speech paths the backend adapts /v1/audio/speech to).
 //   - everything else under /v1/ → the fallback.
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	switch {
@@ -236,6 +250,11 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case req.Method == http.MethodPost &&
 		(req.URL.Path == "/v1/images/generations" || req.URL.Path == "/v1/images/edits"):
 		r.serveByType(w, req, "image")
+	case req.URL.Path == "/v1/audio/synthesize" || req.URL.Path == "/v1/audio/list_voices":
+		// Text-to-speech: the inference.club backend adapts the OpenAI
+		// /v1/audio/speech request to the NVIDIA Riva synthesize / list_voices
+		// paths, which we forward to the tts service.
+		r.serveByType(w, req, "tts")
 	default:
 		r.fallback.proxy.ServeHTTP(w, req)
 	}

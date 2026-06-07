@@ -64,6 +64,13 @@ hosts:
         models:
           - id: my-image-model
 
+      - name: rtx-4090-tts      # a text-to-speech service (NVIDIA Riva / Magpie)
+        type: tts               # backend adapts /v1/audio/speech to this NIM
+        engine: other
+        url: http://192.168.1.10:9000/v1
+        models:
+          - id: magpie-tts-multilingual
+
   - id: mac-studio
     address: 192.168.1.20
     gpu:
@@ -74,4 +81,9 @@ hosts:
       - name: mac-studio-lmstudio
         engine: lmstudio
         url: http://192.168.1.20:1234/v1
+        # Optional LOCAL-ONLY secret. If your backend requires an API key (e.g.
+        # LM Studio started with one), put it here and the agent sends it as
+        # `Authorization: Bearer <key>` on every proxied request. It is STRIPPED
+        # from the manifest before upload, so it never reaches inference.club.
+        # api_key: "sk-..."
         # No `models:` — server auto-discovers via GET /v1/models.

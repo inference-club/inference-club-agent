@@ -35,12 +35,15 @@ func Push(ctx context.Context, baseURL, apiKey string, lr *LoadResult) (*PushRes
 		)
 	}
 
-	parsed, err := lr.Manifest.AsJSONMap()
+	// Strip per-service api_keys before they leave the agent. We send the
+	// REDACTED re-serialization, not lr.Raw — otherwise a secret in the
+	// operator's literal YAML would ride along in raw_yaml.
+	rawYAML, parsed, err := lr.Manifest.RedactedForUpload()
 	if err != nil {
-		return nil, fmt.Errorf("encode manifest as JSON: %w", err)
+		return nil, fmt.Errorf("encode manifest for upload: %w", err)
 	}
 	body, err := json.Marshal(map[string]any{
-		"raw_yaml": string(lr.Raw),
+		"raw_yaml": string(rawYAML),
 		"parsed":   parsed,
 	})
 	if err != nil {

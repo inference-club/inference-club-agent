@@ -92,6 +92,11 @@ func probeService(ctx context.Context, s manifest.Service) (bool, string) {
 	if err != nil {
 		return false, fmt.Sprintf("build request: %v", err)
 	}
+	// Authenticate the probe when the service has an api_key, so a key-gated
+	// server (e.g. LM Studio) doesn't report a false 401.
+	if s.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+s.APIKey)
+	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
