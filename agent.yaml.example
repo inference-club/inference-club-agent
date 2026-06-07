@@ -35,11 +35,29 @@ hosts:
     services:
       - name: rtx-4090-vllm     # must be unique across the whole manifest
         engine: vllm            # vllm | lmstudio | ollama | sglang | llamacpp | tgi | other
-        # type: llm             # llm (default) | stt | tts — what the service provides
+        # type: llm             # llm (default) | stt | tts | image
         url: http://192.168.1.10:8000/v1
+        # Per-model capabilities are DECLARED here — inference.club never guesses
+        # them. `id` (served id, used for routing) is the only required field;
+        # `hf` pools this model with the same model on other nodes and links its
+        # HuggingFace page. Everything else is optional:
+        #   name              human-friendly display name
+        #   input_modalities  e.g. [text] or [text, image]; defaults from `type`
+        #   output_modalities e.g. [text]; defaults from `type`
+        #   features          model capabilities, e.g. [reasoning, tools]
+        #   context_length    declared ceiling; the live-probed window wins
+        #   quantization      e.g. fp8 / int4 (per-deployment)
         models:
           - id: qwen3-30b-a3b
+            hf: Qwen/Qwen3-30B-A3B
+            name: Qwen3 30B A3B
+            features: [reasoning, tools]
+            context_length: 32768
+            quantization: fp8
           - id: mistral-small-3.1
+            hf: mistralai/Mistral-Small-3.1-24B-Instruct
+            input_modalities: [text, image]   # vision model
+            features: [tools]
         command: >              # optional, free-form, for display
           vllm serve Qwen/Qwen3-30B-A3B
           --tensor-parallel-size 1 --max-model-len 32768

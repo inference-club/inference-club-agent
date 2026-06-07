@@ -134,6 +134,37 @@ reload the agent without restarting:
 docker kill -s HUP club-host
 ```
 
+### Declaring model capabilities
+
+inference.club shows each model's modalities, features, and context window in
+its catalog and playground. **You declare these per model — they are never
+guessed.** On each model under a service, `id` is the only required field
+(`hf` is strongly recommended so the same model pools across nodes and links
+its HuggingFace page); everything else is optional:
+
+| field | example | notes |
+|-------|---------|-------|
+| `name` | `Qwen3 30B A3B` | human-friendly display name |
+| `input_modalities` | `[text, image]` | defaults from the service `type` when omitted |
+| `output_modalities` | `[text]` | defaults from the service `type` when omitted |
+| `features` | `[reasoning, tools]` | model capabilities surfaced as badges |
+| `context_length` | `32768` | declared ceiling; the live-probed window wins when known |
+| `quantization` | `fp8` | per-deployment |
+
+```yaml
+models:
+  - id: qwen3-30b-a3b
+    hf: Qwen/Qwen3-30B-A3B
+    name: Qwen3 30B A3B
+    features: [reasoning, tools]
+    context_length: 32768
+    quantization: fp8
+```
+
+Modalities default from the service `type` (`llm`→text/text, `stt`→audio/text,
+`tts`→text/audio, `image`→[text,image]/image), so a plain text LLM needs no
+modality fields at all.
+
 Validate the manifest and probe each service URL without restarting:
 
 ```bash

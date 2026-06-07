@@ -95,11 +95,11 @@ type Service struct {
 	// ["timestamps"] for an STT service launched with a ForcedAligner so
 	// verbose_json returns word timings. Per-deployment, because the same
 	// model may or may not expose a feature depending on how it was served.
-	Features []string          `yaml:"features,omitempty" json:"features,omitempty"`
-	Engine   string            `yaml:"engine" json:"engine"`
-	URL      string            `yaml:"url" json:"url"`
-	Models   []Model           `yaml:"models,omitempty" json:"models,omitempty"`
-	Command  string            `yaml:"command,omitempty" json:"command,omitempty"`
+	Features []string `yaml:"features,omitempty" json:"features,omitempty"`
+	Engine   string   `yaml:"engine" json:"engine"`
+	URL      string   `yaml:"url" json:"url"`
+	Models   []Model  `yaml:"models,omitempty" json:"models,omitempty"`
+	Command  string   `yaml:"command,omitempty" json:"command,omitempty"`
 	// APIKey, when set, is sent as `Authorization: Bearer <key>` on every
 	// request the router proxies to this service's URL — e.g. an LM Studio or
 	// vLLM server started with an API key. It is a LOCAL-ONLY secret: it is
@@ -125,9 +125,27 @@ func (s Service) ServiceType() string {
 //     model its canonical identity on inference.club, which pools the same
 //     model across providers. When ID is omitted the served id defaults to the
 //     HF id (vLLM serves under the HF id unless --served-model-name is set).
+//
+// The remaining fields are operator-declared CAPABILITIES, surfaced on
+// inference.club's catalog and the playground. All optional — the operator
+// knows exactly what they serve, so these are declared, never guessed. When
+// the modality lists are omitted they default from the service Type
+// (llm→text/text, stt→audio/text, tts→text/audio, image→[text,image]/image).
 type Model struct {
 	ID string `yaml:"id,omitempty" json:"id,omitempty"`
 	Hf string `yaml:"hf,omitempty" json:"hf,omitempty"`
+	// Name is a human-friendly display name (e.g. "Qwen3 30B A3B").
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+	// InputModalities / OutputModalities, e.g. ["text", "image"] / ["text"].
+	InputModalities  []string `yaml:"input_modalities,omitempty" json:"input_modalities,omitempty"`
+	OutputModalities []string `yaml:"output_modalities,omitempty" json:"output_modalities,omitempty"`
+	// Features are model-identity capabilities, e.g. ["reasoning", "tools"].
+	Features []string `yaml:"features,omitempty" json:"features,omitempty"`
+	// ContextLength is the declared context-window ceiling. The live-probed
+	// served window (max_model_len) takes precedence when known.
+	ContextLength int `yaml:"context_length,omitempty" json:"context_length,omitempty"`
+	// Quantization, e.g. "fp8" / "int4" (per-deployment).
+	Quantization string `yaml:"quantization,omitempty" json:"quantization,omitempty"`
 }
 
 // ServedID is the id the backend answers to: the explicit ID, or the HF id
@@ -369,6 +387,40 @@ func Validate(m *Manifest) []string {
 				errs = append(errs, fmt.Sprintf(
 					"%s.api_key: exceeds %d chars", sp, MaxStringLen,
 				))
+			}
+
+			// Per-model declared capabilities (all optional). YAML already
+			// enforces the types; just bound strings and reject negatives.
+			for mi, mdl := range s.Models {
+				mp := fmt.Sprintf("%s.models[%d]", sp, mi)
+				for _, fld := range []struct {
+					name, val string
+				}{{"name", mdl.Name}, {"quantization", mdl.Quantization}} {
+					if len(fld.val) > MaxStringLen {
+						errs = append(errs, fmt.Sprintf(
+							"%s.%s: exceeds %d chars", mp, fld.name, MaxStringLen,
+						))
+					}
+				}
+				for _, grp := range []struct {
+					name string
+					vals []string
+				}{
+					{"input_modalities", mdl.InputModalities},
+					{"output_modalities", mdl.OutputModalities},
+					{"features", mdl.Features},
+				} {
+					for vi, v := range grp.vals {
+						if len(v) > MaxStringLen {
+							errs = append(errs, fmt.Sprintf(
+								"%s.%s[%d]: exceeds %d chars", mp, grp.name, vi, MaxStringLen,
+							))
+						}
+					}
+				}
+				if mdl.ContextLength < 0 {
+					errs = append(errs, mp+".context_length: must be non-negative")
+				}
 			}
 		}
 	}
