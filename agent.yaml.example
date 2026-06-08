@@ -89,6 +89,18 @@ hosts:
         models:
           - id: magpie-tts-multilingual
 
+      - name: rtx-4090-music    # a text-to-music service (ACE-Step)
+        type: music             # routes /v1/music/generations here
+        engine: other
+        # ACE-Step's API is async — the agent submits the job (POST
+        # /release_task), polls (POST /query_result), then downloads the
+        # rendered audio (GET /v1/audio) and returns it in one reply. Use the
+        # ACE-Step base URL (NO /v1 suffix); the model `id` selects the DiT
+        # model and must match one ACE-Step has loaded.
+        url: http://192.168.1.10:8015
+        models:
+          - id: acestep-v15-turbo
+
   - id: mac-studio
     address: 192.168.1.20
     gpu:

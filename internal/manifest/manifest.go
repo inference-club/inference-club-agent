@@ -45,8 +45,9 @@ var (
 	// serviceTypes is the *what* a service provides, orthogonal to engine.
 	// Defaults to "llm" when omitted, so pre-existing manifests stay valid.
 	// "mesh" is image-to-3D (e.g. TRELLIS.2): one image in, a textured GLB out.
+	// "music" is text-to-music (e.g. ACE-Step): a prompt in, a rendered song out.
 	serviceTypes = map[string]struct{}{
-		"llm": {}, "stt": {}, "tts": {}, "image": {}, "mesh": {},
+		"llm": {}, "stt": {}, "tts": {}, "image": {}, "mesh": {}, "music": {},
 	}
 )
 
@@ -355,7 +356,7 @@ func Validate(m *Manifest) []string {
 			if s.Type != "" {
 				if _, ok := serviceTypes[s.Type]; !ok {
 					errs = append(errs, fmt.Sprintf(
-						"%s.type: must be one of [image llm mesh stt tts], got %q", sp, s.Type,
+						"%s.type: must be one of [image llm mesh music stt tts], got %q", sp, s.Type,
 					))
 				}
 			}

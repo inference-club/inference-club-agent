@@ -13,6 +13,7 @@ package router
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -261,6 +263,12 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// Image-to-3D: the multipart image+options request goes to the mesh
 		// service, remapped to TRELLIS.2's single POST /generate endpoint.
 		r.serveMesh(w, req)
+	case req.Method == http.MethodPost && req.URL.Path == "/v1/music/generations":
+		// Text-to-music: ACE-Step is async (submit a job, poll for it, then
+		// download the rendered audio). The agent runs that whole loop and
+		// replies with the finished audio bytes, so inference.club can treat
+		// music like every other one-shot modality.
+		r.serveMusic(w, req)
 	default:
 		r.fallback.proxy.ServeHTTP(w, req)
 	}
@@ -294,6 +302,259 @@ func (r *Router) serveMesh(w http.ResponseWriter, req *http.Request) {
 	req.URL.Path = "/v1/generate"
 	w.Header().Set("X-Inference-Club-Backend", target.name)
 	target.proxy.ServeHTTP(w, req)
+}
+
+// Music generation (ACE-Step) is a poll-based async API: POST /release_task
+// returns a task_id, POST /query_result reports progress (status 0 running /
+// 1 succeeded / 2 failed) and, on success, the path to the rendered audio,
+// which we then GET from /v1/audio. serveMusic hides all of that behind one
+// synchronous request. The inbound JSON body is forwarded verbatim to
+// /release_task — inference.club owns ACE-Step's request schema; the agent
+// owns only the submit/poll/download protocol.
+const (
+	musicPollInterval = 1500 * time.Millisecond
+	musicMaxWait      = 8 * time.Minute
+)
+
+// musicClient bounds each individual upstream call. The overall job wait is
+// bounded separately by musicMaxWait via the request context.
+var musicClient = &http.Client{Timeout: 90 * time.Second}
+
+func (r *Router) serveMusic(w http.ResponseWriter, req *http.Request) {
+	b, ok := r.byType["music"]
+	if !ok {
+		http.Error(w, "no music service configured", http.StatusServiceUnavailable)
+		return
+	}
+	body, _, err := readCappedBody(req.Body, MaxCompletionBodyBytes)
+	_ = req.Body.Close()
+	if err != nil {
+		http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("X-Inference-Club-Backend", b.name)
+
+	base := strings.TrimSuffix(b.target.String(), "/")
+	ctx, cancel := context.WithTimeout(req.Context(), musicMaxWait)
+	defer cancel()
+
+	taskID, err := musicSubmit(ctx, b, base, body)
+	if err != nil {
+		log.Printf("music %s: submit failed: %v", b.name, err)
+		http.Error(w, "music submit failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	file, err := musicPoll(ctx, b, base, taskID)
+	if err != nil {
+		log.Printf("music %s: generation failed (task %s): %v", b.name, taskID, err)
+		http.Error(w, "music generation failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	audio, ct, err := musicDownload(ctx, b, base, file)
+	if err != nil {
+		log.Printf("music %s: download failed (task %s): %v", b.name, taskID, err)
+		http.Error(w, "music download failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if ct == "" {
+		ct = "audio/mpeg"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+	_, _ = w.Write(audio)
+}
+
+// musicAuth applies the backend's optional api_key to an upstream call.
+func musicAuth(req *http.Request, b *backend) {
+	if b.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+b.apiKey)
+	}
+}
+
+// musicSubmit posts the generation job and returns its task_id.
+func musicSubmit(ctx context.Context, b *backend, base string, body []byte) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/release_task", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	musicAuth(req, b)
+	resp, err := musicClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("submit HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var env struct {
+		Data struct {
+			TaskID string `json:"task_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return "", fmt.Errorf("decode submit response: %w", err)
+	}
+	if env.Data.TaskID == "" {
+		return "", fmt.Errorf("submit returned no task_id: %s", strings.TrimSpace(string(raw)))
+	}
+	return env.Data.TaskID, nil
+}
+
+// musicPoll queries /query_result until the job finishes, returning the path
+// to the rendered audio. Errors out on failure or when the context expires.
+func musicPoll(ctx context.Context, b *backend, base, taskID string) (string, error) {
+	payload, _ := json.Marshal(map[string][]string{"task_id_list": {taskID}})
+	ticker := time.NewTicker(musicPollInterval)
+	defer ticker.Stop()
+	for {
+		file, done, err := musicQueryOnce(ctx, b, base, payload)
+		if err != nil {
+			return "", err
+		}
+		if done {
+			return file, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("timed out after %s", musicMaxWait)
+		case <-ticker.C:
+		}
+	}
+}
+
+// musicQueryOnce does a single poll. done=true means the job succeeded and
+// `file` holds the audio path; an error means the job failed.
+func musicQueryOnce(ctx context.Context, b *backend, base string, payload []byte) (file string, done bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/query_result", bytes.NewReader(payload))
+	if err != nil {
+		return "", false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	musicAuth(req, b)
+	resp, err := musicClient.Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode != http.StatusOK {
+		return "", false, fmt.Errorf("query HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var env struct {
+		Data []struct {
+			Status int    `json:"status"`
+			Result string `json:"result"`
+			// progress_text carries the upstream's human-readable status — and,
+			// crucially, the error when a job reports success but couldn't save
+			// the audio (e.g. a missing codec). Surface it so failures are
+			// diagnosable instead of a bare "no audio file".
+			ProgressText string `json:"progress_text"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return "", false, fmt.Errorf("decode query response: %w", err)
+	}
+	if len(env.Data) == 0 {
+		return "", false, nil // not visible yet — keep polling
+	}
+	rec := env.Data[0]
+	pt := strings.TrimSpace(rec.ProgressText)
+	switch rec.Status {
+	case 1: // succeeded
+		f, ferr := musicFileFromResult(rec.Result)
+		if ferr != nil {
+			// Job "succeeded" but produced no usable file — the real reason is
+			// usually in progress_text (e.g. a save/codec error upstream).
+			if pt != "" {
+				return "", false, fmt.Errorf("%v — upstream: %s", ferr, pt)
+			}
+			return "", false, ferr
+		}
+		return f, true, nil
+	case 2: // failed
+		msg := musicErrorFromResult(rec.Result)
+		if pt != "" {
+			return "", false, fmt.Errorf("%s (%s)", msg, pt)
+		}
+		return "", false, fmt.Errorf("%s", msg)
+	default: // 0 = queued/running
+		return "", false, nil
+	}
+}
+
+// musicFileFromResult pulls the audio path out of the (JSON-string) result
+// field, which holds an array of generated items (or, defensively, one object).
+func musicFileFromResult(result string) (string, error) {
+	result = strings.TrimSpace(result)
+	if result == "" {
+		return "", fmt.Errorf("succeeded but result was empty")
+	}
+	var items []struct {
+		File string `json:"file"`
+	}
+	if err := json.Unmarshal([]byte(result), &items); err == nil {
+		for _, it := range items {
+			if strings.TrimSpace(it.File) != "" {
+				return it.File, nil
+			}
+		}
+	}
+	var one struct {
+		File string `json:"file"`
+	}
+	if err := json.Unmarshal([]byte(result), &one); err == nil && strings.TrimSpace(one.File) != "" {
+		return one.File, nil
+	}
+	return "", fmt.Errorf("no audio file in result")
+}
+
+// musicErrorFromResult extracts a human-readable error from a failed job's
+// result, falling back to the raw string.
+func musicErrorFromResult(result string) string {
+	var items []struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(result), &items); err == nil {
+		for _, it := range items {
+			if strings.TrimSpace(it.Error) != "" {
+				return it.Error
+			}
+		}
+	}
+	if s := strings.TrimSpace(result); s != "" {
+		return s
+	}
+	return "generation failed"
+}
+
+// musicDownload fetches the rendered audio. `file` is normally a server path
+// like "/v1/audio?path=..."; an absolute URL is honored as-is.
+func musicDownload(ctx context.Context, b *backend, base, file string) ([]byte, string, error) {
+	dl := file
+	if !strings.HasPrefix(file, "http://") && !strings.HasPrefix(file, "https://") {
+		dl = base + "/" + strings.TrimPrefix(file, "/")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dl, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	musicAuth(req, b)
+	resp, err := musicClient.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return nil, "", fmt.Errorf("download HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	audio, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	return audio, resp.Header.Get("Content-Type"), nil
 }
 
 func (r *Router) serveModels(w http.ResponseWriter, _ *http.Request) {
