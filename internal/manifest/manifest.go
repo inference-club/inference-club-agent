@@ -44,8 +44,9 @@ var (
 	}
 	// serviceTypes is the *what* a service provides, orthogonal to engine.
 	// Defaults to "llm" when omitted, so pre-existing manifests stay valid.
+	// "mesh" is image-to-3D (e.g. TRELLIS.2): one image in, a textured GLB out.
 	serviceTypes = map[string]struct{}{
-		"llm": {}, "stt": {}, "tts": {}, "image": {},
+		"llm": {}, "stt": {}, "tts": {}, "image": {}, "mesh": {},
 	}
 )
 
@@ -88,8 +89,9 @@ type GPU struct {
 // agent ROADMAP).
 type Service struct {
 	Name string `yaml:"name" json:"name"`
-	// Type is what the service provides: "llm" (default), "stt", or "tts".
-	// Drives which /v1 endpoint the router forwards here.
+	// Type is what the service provides: "llm" (default), "stt", "tts",
+	// "image", or "mesh" (image-to-3D). Drives which /v1 endpoint the router
+	// forwards here.
 	Type string `yaml:"type,omitempty" json:"type,omitempty"`
 	// Features are operator-declared capabilities of THIS deployment, e.g.
 	// ["timestamps"] for an STT service launched with a ForcedAligner so
@@ -353,7 +355,7 @@ func Validate(m *Manifest) []string {
 			if s.Type != "" {
 				if _, ok := serviceTypes[s.Type]; !ok {
 					errs = append(errs, fmt.Sprintf(
-						"%s.type: must be one of [image llm stt tts], got %q", sp, s.Type,
+						"%s.type: must be one of [image llm mesh stt tts], got %q", sp, s.Type,
 					))
 				}
 			}

@@ -238,6 +238,8 @@ func newBackend(name string, target *url.URL, apiKey string) *backend {
 //     multipart streamed through), or the fallback if none is declared.
 //   - /v1/audio/synthesize | /v1/audio/list_voices → the tts-typed backend
 //     (the NVIDIA Riva speech paths the backend adapts /v1/audio/speech to).
+//   - POST /v1/3d/generations → the mesh-typed backend, remapped to TRELLIS.2's
+//     POST /generate (multipart streamed through), or the fallback if none.
 //   - everything else under /v1/ → the fallback.
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	switch {
@@ -255,6 +257,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// /v1/audio/speech request to the NVIDIA Riva synthesize / list_voices
 		// paths, which we forward to the tts service.
 		r.serveByType(w, req, "tts")
+	case req.Method == http.MethodPost && req.URL.Path == "/v1/3d/generations":
+		// Image-to-3D: the multipart image+options request goes to the mesh
+		// service, remapped to TRELLIS.2's single POST /generate endpoint.
+		r.serveMesh(w, req)
 	default:
 		r.fallback.proxy.ServeHTTP(w, req)
 	}
@@ -269,6 +275,23 @@ func (r *Router) serveByType(w http.ResponseWriter, req *http.Request, serviceTy
 	if b, ok := r.byType[serviceType]; ok {
 		target = b
 	}
+	w.Header().Set("X-Inference-Club-Backend", target.name)
+	target.proxy.ServeHTTP(w, req)
+}
+
+// serveMesh forwards an image-to-3D request to the mesh backend. Unlike the
+// OpenAI-shaped paths, TRELLIS.2 exposes a single POST /generate (no /v1), so
+// we rewrite the inbound /v1/3d/generations to /v1/generate before proxying:
+// the backend director trims the /v1 prefix and joins the backend's base path,
+// yielding /generate on a base-URL backend (http://host:8000). The multipart
+// body (image + options) streams through untouched, and the GLB bytes +
+// X-Trellis-Metadata response header are passed straight back.
+func (r *Router) serveMesh(w http.ResponseWriter, req *http.Request) {
+	target := r.fallback
+	if b, ok := r.byType["mesh"]; ok {
+		target = b
+	}
+	req.URL.Path = "/v1/generate"
 	w.Header().Set("X-Inference-Club-Backend", target.name)
 	target.proxy.ServeHTTP(w, req)
 }
