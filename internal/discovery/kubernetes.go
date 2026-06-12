@@ -222,6 +222,7 @@ func (k *Kubernetes) assemble(ctx context.Context, svcs []k8sService, pods []k8s
 	}
 	return &manifest.Manifest{
 		SchemaVersion: manifest.SchemaVersion,
+		Discovery:     "kubernetes",
 		Agent:         manifest.Agent{Name: k.AgentName},
 		Hosts:         hosts,
 	}
@@ -435,7 +436,15 @@ type k8sPod struct {
 		} `json:"containers"`
 	} `json:"spec"`
 	Status struct {
-		Phase string `json:"phase"`
+		Phase             string `json:"phase"`
+		ContainerStatuses []struct {
+			Name         string `json:"name"`
+			RestartCount int    `json:"restartCount"`
+			Ready        bool   `json:"ready"`
+			State        map[string]struct {
+				Reason string `json:"reason"`
+			} `json:"state"`
+		} `json:"containerStatuses"`
 	} `json:"status"`
 }
 
@@ -456,10 +465,21 @@ type k8sNode struct {
 	Metadata objectMeta `json:"metadata"`
 	Status   struct {
 		Allocatable map[string]string `json:"allocatable"`
+		Capacity    map[string]string `json:"capacity"`
 		Addresses   []struct {
 			Type    string `json:"type"`
 			Address string `json:"address"`
 		} `json:"addresses"`
+		Conditions []struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"conditions"`
+		NodeInfo struct {
+			Architecture   string `json:"architecture"`
+			KubeletVersion string `json:"kubeletVersion"`
+			OSImage        string `json:"osImage"`
+		} `json:"nodeInfo"`
 	} `json:"status"`
 }
 

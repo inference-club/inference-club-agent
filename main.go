@@ -205,6 +205,28 @@ func main() {
 	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
 		routerHolder.Load().ServeHTTP(w, r)
 	})
+	// Live cluster snapshot (PRD 07). Only meaningful in kubernetes
+	// discovery mode — a static-manifest agent has no cluster to report.
+	mux.HandleFunc("/cluster/state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if kdisc == nil {
+			http.Error(w, "cluster state requires kubernetes discovery mode", http.StatusNotFound)
+			return
+		}
+		stateCtx, stateCancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer stateCancel()
+		state, err := kdisc.ClusterState(stateCtx)
+		if err != nil {
+			log.Printf("cluster state: %v", err)
+			http.Error(w, "cluster state unavailable", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(state)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found — try /v1/models", http.StatusNotFound)
 	})

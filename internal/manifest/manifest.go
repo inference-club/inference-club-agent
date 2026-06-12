@@ -55,9 +55,14 @@ var (
 
 // Manifest is the root document.
 type Manifest struct {
-	SchemaVersion int    `yaml:"schema_version" json:"schema_version"`
-	Agent         Agent  `yaml:"agent" json:"agent"`
-	Hosts         []Host `yaml:"hosts" json:"hosts"`
+	SchemaVersion int `yaml:"schema_version" json:"schema_version"`
+	// Discovery records where this manifest came from: "" / "static" for
+	// agent.yaml, "kubernetes" when built from the cluster. The server uses
+	// it to decide whether live cluster state (/cluster/state) is available
+	// for this provider. Additive — older manifests simply omit it.
+	Discovery string `yaml:"discovery,omitempty" json:"discovery,omitempty"`
+	Agent     Agent  `yaml:"agent" json:"agent"`
+	Hosts     []Host `yaml:"hosts" json:"hosts"`
 }
 
 // Agent identifies this agent to inference.club. “Name“ is also the
@@ -264,6 +269,12 @@ func Validate(m *Manifest) []string {
 	if m.SchemaVersion != SchemaVersion {
 		errs = append(errs, fmt.Sprintf(
 			"schema_version must be %d, got %d", SchemaVersion, m.SchemaVersion,
+		))
+	}
+
+	if d := m.Discovery; d != "" && d != "static" && d != "kubernetes" {
+		errs = append(errs, fmt.Sprintf(
+			`discovery: must be omitted, "static" or "kubernetes", got %q`, d,
 		))
 	}
 

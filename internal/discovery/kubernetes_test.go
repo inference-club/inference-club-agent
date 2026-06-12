@@ -47,7 +47,14 @@ func fixtureAPI(t *testing.T) *httptest.Server {
 	   "spec":{"nodeName":"a1","containers":[
 	     {"image":"nvcr.io/nim/nvidia/magpie-tts-multilingual:latest",
 	      "command":["/opt/nim/start.sh"],"args":["--log-level","info"]}]},
-	   "status":{"phase":"Running"}}
+	   "status":{"phase":"Running","containerStatuses":[
+	     {"name":"magpie","restartCount":2,"ready":true,"state":{"running":{}}}]}},
+	  {"metadata":{"name":"magpie-tts-new","labels":{"app":"magpie-tts"}},
+	   "spec":{"nodeName":"a1","containers":[
+	     {"image":"nvcr.io/nim/nvidia/magpie-tts-multilingual:next"}]},
+	   "status":{"phase":"Pending","containerStatuses":[
+	     {"name":"magpie","restartCount":0,"ready":false,
+	      "state":{"waiting":{"reason":"ImagePullBackOff"}}}]}}
 	]}`)
 
 	reply("/apis/discovery.k8s.io/v1/namespaces/inference-club/endpointslices", `{"items":[
@@ -58,8 +65,27 @@ func fixtureAPI(t *testing.T) *httptest.Server {
 	reply("/api/v1/nodes", `{"items":[
 	  {"metadata":{"name":"a1","labels":{"inference-club.com/box":"a1",
 	     "nvidia.com/gpu.product":"NVIDIA-GeForce-RTX-4090","nvidia.com/gpu.memory":"24564"}},
-	   "status":{"allocatable":{"nvidia.com/gpu":"1"},
-	     "addresses":[{"type":"InternalIP","address":"192.168.5.253"}]}}
+	   "status":{"allocatable":{"nvidia.com/gpu":"1","memory":"65536000Ki"},
+	     "capacity":{"memory":"65929340Ki"},
+	     "addresses":[{"type":"InternalIP","address":"192.168.5.253"}],
+	     "conditions":[{"type":"MemoryPressure","status":"False"},
+	       {"type":"Ready","status":"True"}],
+	     "nodeInfo":{"architecture":"amd64","kubeletVersion":"v1.33.1+k3s1",
+	       "osImage":"Ubuntu 24.04.2 LTS"}}},
+	  {"metadata":{"name":"spark","labels":{"inference-club.com/box":"spark"}},
+	   "status":{"allocatable":{"memory":"119Gi"},"capacity":{"memory":"120Gi"},
+	     "addresses":[{"type":"InternalIP","address":"192.168.5.250"}],
+	     "conditions":[{"type":"Ready","status":"False","reason":"KubeletNotReady"}],
+	     "nodeInfo":{"architecture":"arm64","kubeletVersion":"v1.33.1+k3s1",
+	       "osImage":"Ubuntu 24.04.2 LTS"}}}
+	]}`)
+
+	reply("/apis/metrics.k8s.io/v1beta1/nodes", `{"items":[
+	  {"metadata":{"name":"a1"},"usage":{"cpu":"2","memory":"32768000Ki"}}
+	]}`)
+	reply("/apis/metrics.k8s.io/v1beta1/namespaces/inference-club/pods", `{"items":[
+	  {"metadata":{"name":"magpie-tts-abc"},
+	   "containers":[{"usage":{"memory":"4Gi"}},{"usage":{"memory":"1Gi"}}]}
 	]}`)
 
 	reply("/api/v1/namespaces/inference-club/secrets/lmstudio-key",
