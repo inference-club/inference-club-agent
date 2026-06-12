@@ -269,6 +269,11 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// replies with the finished audio bytes, so inference.club can treat
 		// music like every other one-shot modality.
 		r.serveMusic(w, req)
+	case req.Method == http.MethodPost && req.URL.Path == "/v1/videos/generations":
+		// Text/image-to-video (LTX-2): a one-shot JSON request the agent
+		// forwards to the video server's single POST /generate endpoint,
+		// streaming the rendered MP4 bytes straight back.
+		r.serveVideo(w, req)
 	default:
 		r.fallback.proxy.ServeHTTP(w, req)
 	}
@@ -302,6 +307,92 @@ func (r *Router) serveMesh(w http.ResponseWriter, req *http.Request) {
 	req.URL.Path = "/v1/generate"
 	w.Header().Set("X-Inference-Club-Backend", target.name)
 	target.proxy.ServeHTTP(w, req)
+}
+
+// MaxVideoBodyBytes is the initial read buffer for an inbound video request.
+// Larger than the chat cap because an image-to-video body carries the optional
+// first-frame image inline as a base64 string; readCappedBody still drains
+// anything past it, so this only avoids a second read for typical images.
+const MaxVideoBodyBytes = 16 << 20 // 16 MiB
+
+// videoMaxWait bounds a single text/image-to-video generation. LTX renders can
+// run for minutes; the inbound request context still cancels earlier if the
+// caller (inference.club) gives up first.
+const videoMaxWait = 10 * time.Minute
+
+// videoClient performs the upstream /generate call. No per-call Timeout — the
+// request context (videoMaxWait) is the single source of truth for the deadline.
+var videoClient = &http.Client{}
+
+// serveVideo forwards a text/image-to-video request to the video backend. The
+// LTX-2 server exposes a single POST /generate (no /v1 prefix) that accepts the
+// JSON body verbatim and returns raw video/mp4 bytes plus an X-LTX-Params header
+// describing the resolved (snapped) parameters. The agent buffers the inbound
+// JSON, forwards it, and streams the MP4 straight back — inference.club owns the
+// request schema; the agent owns only the transport.
+func (r *Router) serveVideo(w http.ResponseWriter, req *http.Request) {
+	b, ok := r.byType["video"]
+	if !ok {
+		http.Error(w, "no video service configured", http.StatusServiceUnavailable)
+		return
+	}
+	body, _, err := readCappedBody(req.Body, MaxVideoBodyBytes)
+	_ = req.Body.Close()
+	if err != nil {
+		http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("X-Inference-Club-Backend", b.name)
+
+	base := strings.TrimSuffix(b.target.String(), "/")
+	ctx, cancel := context.WithTimeout(req.Context(), videoMaxWait)
+	defer cancel()
+
+	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/generate", bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, "build upstream request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	upReq.Header.Set("Content-Type", "application/json")
+	if b.apiKey != "" {
+		upReq.Header.Set("Authorization", "Bearer "+b.apiKey)
+	}
+
+	resp, err := videoClient.Do(upReq)
+	if err != nil {
+		log.Printf("video %s: generation failed: %v", b.name, err)
+		http.Error(w, "video generation failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		log.Printf("video %s: upstream HTTP %d: %s", b.name, resp.StatusCode, strings.TrimSpace(string(raw)))
+		if ct := resp.Header.Get("Content-Type"); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(raw)
+		return
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "video/mp4"
+	}
+	w.Header().Set("Content-Type", ct)
+	// Pass through the resolved (snapped) generation params so the backend can
+	// record the true width/height/fps/frame-count it rendered at.
+	if p := resp.Header.Get("X-LTX-Params"); p != "" {
+		w.Header().Set("X-LTX-Params", p)
+	}
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		w.Header().Set("Content-Length", cl)
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("video %s: stream error: %v", b.name, err)
+	}
 }
 
 // Music generation (ACE-Step) is a poll-based async API: POST /release_task

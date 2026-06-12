@@ -46,8 +46,10 @@ var (
 	// Defaults to "llm" when omitted, so pre-existing manifests stay valid.
 	// "mesh" is image-to-3D (e.g. TRELLIS.2): one image in, a textured GLB out.
 	// "music" is text-to-music (e.g. ACE-Step): a prompt in, a rendered song out.
+	// "video" is text/image-to-video (e.g. LTX-2): a prompt (+ optional
+	// first-frame image) in, a rendered MP4 out.
 	serviceTypes = map[string]struct{}{
-		"llm": {}, "stt": {}, "tts": {}, "image": {}, "mesh": {}, "music": {},
+		"llm": {}, "stt": {}, "tts": {}, "image": {}, "mesh": {}, "music": {}, "video": {},
 	}
 )
 
@@ -356,7 +358,7 @@ func Validate(m *Manifest) []string {
 			if s.Type != "" {
 				if _, ok := serviceTypes[s.Type]; !ok {
 					errs = append(errs, fmt.Sprintf(
-						"%s.type: must be one of [image llm mesh music stt tts], got %q", sp, s.Type,
+						"%s.type: must be one of [image llm mesh music stt tts video], got %q", sp, s.Type,
 					))
 				}
 			}

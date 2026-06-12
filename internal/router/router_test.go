@@ -255,6 +255,44 @@ func TestRouter_RoutesImagesToImageBackend(t *testing.T) {
 	}
 }
 
+// Video generations must route to the video-typed backend, hitting its single
+// POST /generate endpoint (not an OpenAI-shaped path).
+func TestRouter_RoutesVideosToVideoBackend(t *testing.T) {
+	llm := newFakeUpstream(t, "llm")
+	vid := newFakeUpstream(t, "vid")
+	fallback := newFakeUpstream(t, "fallback")
+	m := &manifest.Manifest{
+		SchemaVersion: 1,
+		Agent:         manifest.Agent{Name: "club-host"},
+		Hosts: []manifest.Host{{
+			ID: "rig-a",
+			Services: []manifest.Service{
+				{Name: "vllm", Engine: "vllm", URL: llm.URL().String(), Models: []manifest.Model{{ID: "model-a"}}},
+				{Name: "ltx", Type: "video", Engine: "other", URL: vid.URL().String(), Models: []manifest.Model{{ID: "ltx-2"}}},
+			},
+		}},
+	}
+	r := New(m, fallback.URL())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/videos/generations", strings.NewReader(`{"prompt":"a fox in snow"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	if len(vid.calls) != 1 || !strings.HasSuffix(vid.calls[0].path, "/generate") {
+		t.Fatalf("video request did not route to /generate on the video backend: %+v", vid.calls)
+	}
+	if vid.calls[0].body != `{"prompt":"a fox in snow"}` {
+		t.Fatalf("video request body not forwarded verbatim: %q", vid.calls[0].body)
+	}
+	if len(llm.calls) != 0 || len(fallback.calls) != 0 {
+		t.Fatalf("video request leaked to llm=%d fallback=%d", len(llm.calls), len(fallback.calls))
+	}
+}
+
 // TTS synthesize + list_voices must route to the tts-typed backend.
 func TestRouter_RoutesTtsToTtsBackend(t *testing.T) {
 	llm := newFakeUpstream(t, "llm")
