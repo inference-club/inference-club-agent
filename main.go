@@ -25,6 +25,14 @@
 //	AGENT_CONFIG_FILE        path to agent.yaml (default: /etc/inference-club-agent/agent.yaml)
 //	TAILSCALE_LOGIN_SERVER   override for Headscale (default: empty → Tailscale's control plane)
 //
+// Kubernetes discovery mode — the cluster replaces agent.yaml (see
+// internal/discovery):
+//
+//	AGENT_DISCOVERY           "kubernetes" to build the manifest from labeled
+//	                          Services instead of agent.yaml; "static"/"" = file
+//	AGENT_DISCOVERY_NAMESPACE namespace to watch (default: inference-club)
+//	AGENT_DISCOVERY_INTERVAL  cluster poll interval (default: 30s)
+//
 // Local-dev (no Tailscale) mode — see README "Local development":
 //
 //	AGENT_DIRECT             when truthy, skip Tailscale entirely: serve plain HTTP on a
@@ -59,6 +67,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/briancaffey/inference-club-agent/host-agent/internal/discovery"
 	"github.com/briancaffey/inference-club-agent/host-agent/internal/manifest"
 	"github.com/briancaffey/inference-club-agent/host-agent/internal/router"
 	"tailscale.com/tsnet"
@@ -77,7 +86,22 @@ func main() {
 
 	cfg := loadConfig()
 
-	mf, mfErrs := loadManifest(cfg)
+	// kubernetes discovery mode: the cluster, not agent.yaml, is the source
+	// of truth. Build the manifest from labeled Services and keep rebuilding
+	// on a poll loop (below) so the manifest tracks the cluster.
+	var kdisc *discovery.Kubernetes
+	if cfg.Discovery == "kubernetes" {
+		var err error
+		kdisc, err = discovery.NewInCluster(
+			getenv("AGENT_NAME", "club-host"), cfg.DiscoveryNamespace)
+		if err != nil {
+			log.Fatalf("kubernetes discovery: %v", err)
+		}
+	} else if cfg.Discovery != "" && cfg.Discovery != "static" {
+		log.Fatalf("AGENT_DISCOVERY must be empty, \"static\" or \"kubernetes\", got %q", cfg.Discovery)
+	}
+
+	mf, mfErrs := loadOrDiscoverManifest(cfg, kdisc)
 	if mfErrs != nil {
 		log.Fatalf("manifest invalid — fix and restart:\n  - %s",
 			strings.Join(mfErrs, "\n  - "))
@@ -118,27 +142,60 @@ func main() {
 	routerHolder.Store(buildRouter(mf.Manifest, target))
 	logRouterBackends("initial", routerHolder.Load(), cfg.LocalLLMURL)
 
-	// SIGHUP → reload + revalidate + reupload the manifest, then rebuild
-	// the model→backend router and atomically swap it in. In-flight
-	// requests keep using the previous router (their goroutine already
-	// holds the *Router pointer); new requests pick up the swap. We do
-	// not touch the running tsnet listener.
+	// reload re-derives the manifest (file or cluster), re-uploads it, and
+	// atomically swaps the router. In-flight requests keep using the previous
+	// router (their goroutine already holds the *Router pointer); new
+	// requests pick up the swap. We do not touch the running tsnet listener.
+	// In kubernetes mode `force` is false on poll ticks so an unchanged
+	// cluster costs nothing (byte-diff of the built YAML, no push, no probe).
+	lastRaw := mf.Raw
+	var reloadMu sync.Mutex
+	reload := func(why string, force bool) {
+		reloadMu.Lock()
+		defer reloadMu.Unlock()
+		newMF, errs := loadOrDiscoverManifest(cfg, kdisc)
+		if errs != nil {
+			log.Printf("manifest reload (%s) failed (keeping previous):\n  - %s",
+				why, strings.Join(errs, "\n  - "))
+			return
+		}
+		if !force && lastRaw != nil && bytes.Equal(newMF.Raw, lastRaw) {
+			return
+		}
+		lastRaw = newMF.Raw
+		log.Printf("manifest changed (%s) — re-uploading and rebuilding router", why)
+		pushManifest(cfg, newMF)
+		routerHolder.Store(buildRouter(newMF.Manifest, target))
+		logRouterBackends("reloaded", routerHolder.Load(), cfg.LocalLLMURL)
+	}
+
+	// SIGHUP → immediate forced reload (file mode: re-read agent.yaml;
+	// kubernetes mode: re-list the cluster right now).
 	hupCh := make(chan os.Signal, 1)
 	signal.Notify(hupCh, syscall.SIGHUP)
 	go func() {
 		for range hupCh {
 			log.Print("SIGHUP received — reloading manifest")
-			newMF, errs := loadManifest(cfg)
-			if errs != nil {
-				log.Printf("manifest reload failed (keeping previous):\n  - %s",
-					strings.Join(errs, "\n  - "))
-				continue
-			}
-			pushManifest(cfg, newMF)
-			routerHolder.Store(buildRouter(newMF.Manifest, target))
-			logRouterBackends("reloaded", routerHolder.Load(), cfg.LocalLLMURL)
+			reload("SIGHUP", true)
 		}
 	}()
+
+	// kubernetes mode: poll the cluster so Services coming and going are
+	// reflected without anyone sending signals.
+	if kdisc != nil {
+		go func() {
+			tick := time.NewTicker(cfg.DiscoveryInterval)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					reload("poll", false)
+				}
+			}
+		}()
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -243,6 +300,13 @@ type config struct {
 	Direct        bool
 	AdvertiseHost string
 
+	// Discovery selects where the manifest comes from: "" / "static" reads
+	// AGENT_CONFIG_FILE (agent.yaml); "kubernetes" builds it from Services
+	// labeled inference-club.com/managed=true in DiscoveryNamespace.
+	Discovery          string
+	DiscoveryNamespace string
+	DiscoveryInterval  time.Duration
+
 	mu sync.Mutex // guards Name/Hostname/ListenPort under SIGHUP reload
 }
 
@@ -260,6 +324,17 @@ func loadConfig() *config {
 
 		Direct:        getenvBool("AGENT_DIRECT"),
 		AdvertiseHost: getenv("AGENT_ADVERTISE_HOST", "host.docker.internal"),
+
+		Discovery:          strings.ToLower(strings.TrimSpace(os.Getenv("AGENT_DISCOVERY"))),
+		DiscoveryNamespace: getenv("AGENT_DISCOVERY_NAMESPACE", "inference-club"),
+		DiscoveryInterval:  30 * time.Second,
+	}
+	if v := os.Getenv("AGENT_DISCOVERY_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Second {
+			log.Fatalf("invalid AGENT_DISCOVERY_INTERVAL (want e.g. 30s): %q", v)
+		}
+		c.DiscoveryInterval = d
 	}
 	if v := os.Getenv("AGENT_LISTEN_PORT"); v != "" {
 		if _, err := fmt.Sscanf(v, "%d", &c.ListenPort); err != nil {
@@ -377,6 +452,31 @@ type registerResponse struct {
 	TailscaleAuthkey     string `json:"tailscale_authkey"`
 	TailscaleLoginServer string `json:"tailscale_login_server"`
 	TailnetHostname      string `json:"tailnet_hostname"`
+}
+
+// loadOrDiscoverManifest returns the manifest from whichever source the
+// config selects: the kubernetes discoverer when one was constructed, else
+// agent.yaml / env synthesis via loadManifest.
+func loadOrDiscoverManifest(cfg *config, kdisc *discovery.Kubernetes) (*manifest.LoadResult, []string) {
+	if kdisc == nil {
+		return loadManifest(cfg)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	lr, verrs, err := kdisc.Build(ctx)
+	if err != nil {
+		return nil, []string{err.Error()}
+	}
+	if verrs != nil {
+		return nil, verrs
+	}
+	hosts, services := 0, 0
+	for _, h := range lr.Manifest.Hosts {
+		hosts++
+		services += len(h.Services)
+	}
+	log.Printf("discovered manifest from kubernetes (%d hosts, %d services)", hosts, services)
+	return lr, nil
 }
 
 // loadManifest reads agent.yaml from cfg.ConfigFile. If the file is

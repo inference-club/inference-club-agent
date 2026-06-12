@@ -1,0 +1,8 @@
+inference-club-agent installed.
+
+  mode:       {{ .Values.discovery.mode }} discovery in namespace {{ include "agent.discoveryNamespace" . }}
+  registers:  {{ .Values.agentName }} → {{ .Values.clubUrl }}
+
+Label a Service to publish it (see the chart README / 02-k8s-discovery.md):
+  kubectl -n {{ include "agent.discoveryNamespace" . }} label svc <name> inference-club.com/managed=true
+The agent re-lists the cluster every {{ .Values.discovery.interval }}.

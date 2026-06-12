@@ -1,5 +1,5 @@
 # Built binaries
-inference-club-agent
+/inference-club-agent
 out/
 
 # Go

@@ -1,0 +1,9 @@
+apiVersion: v2
+name: inference-club-agent
+description: >-
+  inference.club provider agent. In kubernetes discovery mode it builds its
+  service manifest from Services labeled inference-club.com/managed=true
+  instead of agent.yaml, and routes /v1/* to them over cluster DNS.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

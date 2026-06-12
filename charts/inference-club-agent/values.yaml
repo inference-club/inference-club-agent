@@ -1,0 +1,48 @@
+image:
+  repository: ghcr.io/inference-club/inference-club-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# inference.club to register with. Point at a dev instance while experimenting.
+clubUrl: https://inference.club
+
+# Provider name this agent registers as. Use a fresh experimental account's
+# provider while a legacy agent still serves your real one.
+agentName: club-host-k8s
+
+# API key (dashboard → settings → token). Either reference an existing Secret
+# (recommended) or inline a value and the chart renders the Secret for you.
+apiKey:
+  existingSecret: ""
+  secretKey: api-key
+  value: ""
+
+discovery:
+  mode: kubernetes          # kubernetes | static (static expects an agent.yaml mount you add yourself)
+  namespace: ""             # default: the release namespace
+  interval: 30s
+
+# Direct mode = no tailscale; the inference.club backend reaches the agent at
+# advertiseHost:listenPort (local dev). Leave disabled for tailnet mode.
+direct:
+  enabled: false
+  advertiseHost: ""
+
+listenPort: 8090
+
+service:
+  # LoadBalancer on k3s (klipper/ServiceLB) binds node LAN IPs — the backend
+  # can reach any node IP at this port.
+  type: LoadBalancer
+  port: 8090
+
+# tsnet state (tailnet mode) survives restarts only with persistence on.
+persistence:
+  enabled: false
+  size: 1Gi
+  storageClass: ""
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "agent.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "agent.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels: {{- include "agent.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agent.fullname" . }}
+      containers:
+        - name: agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.listenPort }}
+          env:
+            - name: INFERENCE_CLUB_URL
+              value: {{ .Values.clubUrl | quote }}
+            - name: INFERENCE_CLUB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent.apiKeySecretName" . }}
+                  key: {{ .Values.apiKey.secretKey }}
+            - name: AGENT_NAME
+              value: {{ .Values.agentName | quote }}
+            - name: AGENT_DISCOVERY
+              value: {{ .Values.discovery.mode | quote }}
+            - name: AGENT_DISCOVERY_NAMESPACE
+              value: {{ include "agent.discoveryNamespace" . | quote }}
+            - name: AGENT_DISCOVERY_INTERVAL
+              value: {{ .Values.discovery.interval | quote }}
+            - name: AGENT_LISTEN_PORT
+              value: {{ .Values.listenPort | quote }}
+            {{- if .Values.direct.enabled }}
+            - name: AGENT_DIRECT
+              value: "1"
+            - name: AGENT_ADVERTISE_HOST
+              value: {{ required "direct.advertiseHost is required when direct.enabled" .Values.direct.advertiseHost | quote }}
+            {{- end }}
+            - name: AGENT_STATE_DIR
+              value: /var/lib/club-host
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/club-host
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+          {{- with .Values.resources }}
+          resources: {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: state
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "agent.fullname" . }}-state
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
