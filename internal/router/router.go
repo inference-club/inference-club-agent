@@ -121,6 +121,15 @@ func NewWithProbe(m *manifest.Manifest, fallbackURL *url.URL, ctxLens map[string
 					if _, seen := r.byType[st]; !seen {
 						r.byType[st] = b
 					}
+					// A tts service that advertises voice-cloning (Dia) also
+					// answers the dedicated /v1/voice/generations path. Index it
+					// under a synthetic "voice" type so it's chosen over a plain
+					// Riva tts service sharing the box.
+					if st == "tts" && hasFeature(svc.Features, "voice-cloning") {
+						if _, seen := r.byType["voice"]; !seen {
+							r.byType["voice"] = b
+						}
+					}
 				}
 				for _, m := range svc.Models {
 					served := m.ServedID()
@@ -274,6 +283,13 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// forwards to the video server's single POST /generate endpoint,
 		// streaming the rendered MP4 bytes straight back.
 		r.serveVideo(w, req)
+	case req.Method == http.MethodPost && req.URL.Path == "/v1/voice/generations":
+		// Voice cloning / text-to-dialogue (Dia): the inference.club backend
+		// builds a multipart request (script + optional audio prompt +
+		// transcript + sampling fields) which we forward to Dia's single POST
+		// /generate, streaming the audio/wav (and x-seed / x-sample-rate /
+		// x-duration-seconds headers) straight back.
+		r.serveVoice(w, req)
 	default:
 		r.fallback.proxy.ServeHTTP(w, req)
 	}
@@ -307,6 +323,35 @@ func (r *Router) serveMesh(w http.ResponseWriter, req *http.Request) {
 	req.URL.Path = "/v1/generate"
 	w.Header().Set("X-Inference-Club-Backend", target.name)
 	target.proxy.ServeHTTP(w, req)
+}
+
+// serveVoice forwards a voice-cloning / dialogue request to the Dia backend (a
+// tts service advertising the voice-cloning feature, indexed under the
+// synthetic "voice" type). Like mesh, Dia exposes a single POST /generate (no
+// /v1), so we rewrite the inbound /v1/voice/generations to /v1/generate; the
+// director then trims /v1 and joins the backend base path, yielding /generate.
+// The multipart body (script + optional audio prompt + transcript + sampling
+// fields) streams through untouched, and the audio/wav bytes plus the
+// x-seed / x-sample-rate / x-duration-seconds headers pass straight back.
+func (r *Router) serveVoice(w http.ResponseWriter, req *http.Request) {
+	b, ok := r.byType["voice"]
+	if !ok {
+		http.Error(w, "no voice-cloning service configured", http.StatusServiceUnavailable)
+		return
+	}
+	req.URL.Path = "/v1/generate"
+	w.Header().Set("X-Inference-Club-Backend", b.name)
+	b.proxy.ServeHTTP(w, req)
+}
+
+// hasFeature reports whether a declared-features list contains feat.
+func hasFeature(features []string, feat string) bool {
+	for _, f := range features {
+		if f == feat {
+			return true
+		}
+	}
+	return false
 }
 
 // MaxVideoBodyBytes is the initial read buffer for an inbound video request.
