@@ -54,6 +54,10 @@ var (
 	serviceTypes = map[string]struct{}{
 		"llm": {}, "stt": {}, "tts": {}, "image": {}, "mesh": {}, "music": {}, "video": {},
 		"scrape": {},
+		// "audio-enhance" is speech enhancement / super-resolution (e.g. NVIDIA
+		// Maxine Studio Voice): a noisy/artifacted audio file in, a cleaned audio
+		// file out (audio→audio). gRPC-only upstream, fronted by an HTTP bridge.
+		"audio-enhance": {},
 	}
 )
 
@@ -373,7 +377,7 @@ func Validate(m *Manifest) []string {
 			if s.Type != "" {
 				if _, ok := serviceTypes[s.Type]; !ok {
 					errs = append(errs, fmt.Sprintf(
-						"%s.type: must be one of [image llm mesh music stt tts video], got %q", sp, s.Type,
+						"%s.type: must be one of [audio-enhance image llm mesh music scrape stt tts video], got %q", sp, s.Type,
 					))
 				}
 			}

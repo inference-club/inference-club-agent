@@ -290,6 +290,14 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// /generate, streaming the audio/wav (and x-seed / x-sample-rate /
 		// x-duration-seconds headers) straight back.
 		r.serveVoice(w, req)
+	case req.Method == http.MethodPost && req.URL.Path == "/v1/audio/enhance":
+		// Speech enhancement (Maxine Studio Voice): a multipart audio upload
+		// (file + model + response_format) the agent streams untouched to the
+		// audio-enhance backend — an HTTP bridge in front of the gRPC-only NIM.
+		// Like transcriptions it serves the OpenAI-style path directly, so no
+		// rewrite: the director trims /v1 and rejoins the backend base-path (/v1)
+		// → /v1/audio/enhance. The cleaned wav streams straight back.
+		r.serveByType(w, req, "audio-enhance")
 	case req.Method == http.MethodPost && req.URL.Path == "/v1/scrape":
 		// URL→markdown (Firecrawl): a one-shot JSON request the agent forwards
 		// to the scrape service's POST /v1/scrape, returning the extracted
