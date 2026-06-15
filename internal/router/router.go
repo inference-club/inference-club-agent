@@ -290,6 +290,13 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// /generate, streaming the audio/wav (and x-seed / x-sample-rate /
 		// x-duration-seconds headers) straight back.
 		r.serveVoice(w, req)
+	case req.Method == http.MethodPost && req.URL.Path == "/v1/scrape":
+		// URL→markdown (Firecrawl): a one-shot JSON request the agent forwards
+		// to the scrape service's POST /v1/scrape, returning the extracted
+		// markdown as text/markdown. Firecrawl uses the operator-configured LLM
+		// (env OPENAI_BASE_URL, default the in-cluster vLLM) under the hood for
+		// clean extraction — that's the backend's concern, not the agent's.
+		r.serveScrape(w, req)
 	default:
 		r.fallback.proxy.ServeHTTP(w, req)
 	}
@@ -438,6 +445,133 @@ func (r *Router) serveVideo(w http.ResponseWriter, req *http.Request) {
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		log.Printf("video %s: stream error: %v", b.name, err)
 	}
+}
+
+// MaxScrapeBodyBytes caps an inbound scrape request — just a URL plus a few
+// options — so a small buffer is plenty (readCappedBody drains any overflow).
+const MaxScrapeBodyBytes = 64 << 10 // 64 KiB
+
+// MaxScrapeRespBytes caps the Firecrawl response we buffer (markdown of a long
+// page plus metadata).
+const MaxScrapeRespBytes = 16 << 20 // 16 MiB
+
+// scrapeMaxWait bounds a single URL→markdown scrape: Firecrawl drives a headless
+// browser and may call an LLM for clean extraction, so allow a few minutes. The
+// inbound request context still cancels earlier if the caller gives up.
+const scrapeMaxWait = 3 * time.Minute
+
+// scrapeClient performs the upstream /scrape call. No per-call Timeout — the
+// request context (scrapeMaxWait) is the single source of truth for the deadline.
+var scrapeClient = &http.Client{}
+
+// sanitizeHeader strips CR/LF so a scraped title/URL can't inject headers.
+func sanitizeHeader(v string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ").Replace(v)
+}
+
+// serveScrape forwards a URL→markdown request to the scrape backend (Firecrawl).
+// inference.club sends a simple {"url": "..."} (optionally with Firecrawl options
+// like formats / onlyMainContent); the agent guarantees a URL is present and that
+// markdown is requested, calls Firecrawl's POST /v1/scrape (the backend base path
+// joins to /scrape), and returns the extracted markdown as text/markdown — with
+// the page title and source URL in X-Scrape-Title / X-Scrape-Source-Url — so
+// inference.club stores it as a document asset. Firecrawl uses the operator's
+// LLM (env OPENAI_BASE_URL, default the in-cluster vLLM) for clean extraction;
+// that round trip is entirely the backend's concern.
+func (r *Router) serveScrape(w http.ResponseWriter, req *http.Request) {
+	b, ok := r.byType["scrape"]
+	if !ok {
+		http.Error(w, "no scrape service configured", http.StatusServiceUnavailable)
+		return
+	}
+	raw, _, err := readCappedBody(req.Body, MaxScrapeBodyBytes)
+	_ = req.Body.Close()
+	if err != nil {
+		http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// inference.club owns the request fields; the agent only guarantees a URL is
+	// present and that markdown is among the requested formats (Firecrawl
+	// defaults to markdown, but we set it so the response always carries it).
+	payload := map[string]any{}
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if jerr := json.Unmarshal(raw, &payload); jerr != nil {
+			http.Error(w, "scrape body must be a JSON object: "+jerr.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if u, _ := payload["url"].(string); strings.TrimSpace(u) == "" {
+		http.Error(w, `scrape request needs a "url"`, http.StatusBadRequest)
+		return
+	}
+	if _, has := payload["formats"]; !has {
+		payload["formats"] = []string{"markdown"}
+	}
+	outBody, err := json.Marshal(payload)
+	if err != nil {
+		http.Error(w, "encode upstream request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("X-Inference-Club-Backend", b.name)
+	base := strings.TrimSuffix(b.target.String(), "/")
+	ctx, cancel := context.WithTimeout(req.Context(), scrapeMaxWait)
+	defer cancel()
+
+	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/scrape", bytes.NewReader(outBody))
+	if err != nil {
+		http.Error(w, "build upstream request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	upReq.Header.Set("Content-Type", "application/json")
+	if b.apiKey != "" {
+		upReq.Header.Set("Authorization", "Bearer "+b.apiKey)
+	}
+
+	resp, err := scrapeClient.Do(upReq)
+	if err != nil {
+		log.Printf("scrape %s: request failed: %v", b.name, err)
+		http.Error(w, "scrape failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	respRaw, _ := io.ReadAll(io.LimitReader(resp.Body, MaxScrapeRespBytes))
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("scrape %s: upstream HTTP %d: %s", b.name, resp.StatusCode, strings.TrimSpace(string(respRaw)))
+		if ct := resp.Header.Get("Content-Type"); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(respRaw)
+		return
+	}
+
+	// Firecrawl returns {"success":true,"data":{"markdown":"...","metadata":{...}}}.
+	var fc struct {
+		Data struct {
+			Markdown string `json:"markdown"`
+			Metadata struct {
+				Title     string `json:"title"`
+				SourceURL string `json:"sourceURL"`
+			} `json:"metadata"`
+		} `json:"data"`
+	}
+	if jerr := json.Unmarshal(respRaw, &fc); jerr != nil {
+		log.Printf("scrape %s: decode response: %v", b.name, jerr)
+		http.Error(w, "scrape response was not valid Firecrawl JSON", http.StatusBadGateway)
+		return
+	}
+
+	if t := fc.Data.Metadata.Title; t != "" {
+		w.Header().Set("X-Scrape-Title", sanitizeHeader(t))
+	}
+	if u := fc.Data.Metadata.SourceURL; u != "" {
+		w.Header().Set("X-Scrape-Source-Url", sanitizeHeader(u))
+	}
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	_, _ = io.WriteString(w, fc.Data.Markdown)
 }
 
 // Music generation (ACE-Step) is a poll-based async API: POST /release_task

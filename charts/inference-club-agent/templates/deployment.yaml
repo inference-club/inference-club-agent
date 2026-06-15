@@ -6,6 +6,14 @@ metadata:
   labels: {{- include "agent.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  # The agent owns a single tailnet identity (hostname club-host-<id>). A
+  # RollingUpdate would briefly run two pods, colliding on that hostname (the
+  # second joins as club-host-<id>-1 and the backend can't reach it) and, with
+  # persistence on, racing for the same RWO state volume. Recreate fully stops
+  # the old pod — releasing the tailnet device and the PVC — before starting
+  # the new one.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "agent.name" . }}
@@ -51,12 +59,20 @@ spec:
           volumeMounts:
             - name: state
               mountPath: /var/lib/club-host
+          {{- if .Values.direct.enabled }}
+          # Direct mode binds a real TCP listener on the pod IP, so kubelet can
+          # probe /healthz. In tailnet mode the only listener is tsnet's
+          # userspace netstack (the pod IP never binds the port), so an httpGet
+          # probe would always fail — liveness is instead handled by the
+          # inference.club backend prober reaching the agent over the tailnet at
+          # club-host-<id>:{{ .Values.listenPort }}/healthz.
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             initialDelaySeconds: 3
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             initialDelaySeconds: 10
+          {{- end }}
           {{- with .Values.resources }}
           resources: {{- toYaml . | nindent 12 }}
           {{- end }}

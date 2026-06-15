@@ -112,6 +112,20 @@ hosts:
           - id: ltx-2
             name: LTX-2 Video
 
+      - name: rtx-4090-scrape   # a URL→markdown service (Firecrawl)
+        type: scrape            # routes /v1/scrape here
+        engine: other
+        # The agent forwards {"url": ...} to Firecrawl's POST /v1/scrape
+        # (defaulting the format to markdown) and returns the extracted markdown
+        # as text/markdown. Use the Firecrawl base URL WITH the /v1 suffix so the
+        # path joins to /v1/scrape. Firecrawl calls an LLM under the hood for
+        # clean extraction — point it (via its own OPENAI_BASE_URL env) at the
+        # local cluster LLM; that's the backend's config, not the agent's.
+        url: http://192.168.1.10:3002/v1
+        models:
+          - id: firecrawl
+            name: Firecrawl (URL → markdown)
+
   - id: mac-studio
     address: 192.168.1.20
     gpu:

@@ -48,8 +48,12 @@ var (
 	// "music" is text-to-music (e.g. ACE-Step): a prompt in, a rendered song out.
 	// "video" is text/image-to-video (e.g. LTX-2): a prompt (+ optional
 	// first-frame image) in, a rendered MP4 out.
+	// "scrape" is URL→markdown (e.g. Firecrawl): a URL in, extracted markdown
+	// out. A "high-level" service — it calls an LLM under the hood for clean
+	// extraction, but to the agent it's just another typed backend.
 	serviceTypes = map[string]struct{}{
 		"llm": {}, "stt": {}, "tts": {}, "image": {}, "mesh": {}, "music": {}, "video": {},
+		"scrape": {},
 	}
 )
 

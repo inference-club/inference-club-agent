@@ -49,6 +49,12 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list]
+  # Live usage figures for /cluster/state (PRD 07): node + pod metrics from
+  # metrics-server (ships with k3s). NodeMetrics is cluster-scoped, so it
+  # lives here rather than in the discovery Role.
+  - apiGroups: [metrics.k8s.io]
+    resources: [nodes, pods]
+    verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

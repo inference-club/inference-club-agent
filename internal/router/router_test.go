@@ -590,3 +590,106 @@ func TestRouter_TruncatedBodyFallsBackSafely(t *testing.T) {
 			len(fallback.calls[0].body), len(body))
 	}
 }
+
+// --- scrape (Firecrawl, PRD 12) ---------------------------------------------
+
+// firecrawlFake stands in for Firecrawl: it records the request it got and
+// replies with Firecrawl's {"success":true,"data":{markdown,metadata}} shape.
+func firecrawlFake(t *testing.T, gotPath, gotBody *string) *httptest.Server {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		*gotPath = r.URL.Path
+		*gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"success":true,"data":{"markdown":"# Hello\n\nworld","metadata":{"title":"Hi","sourceURL":"https://ex.com/p"}}}`)
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func TestRouter_RoutesScrapeToFirecrawl(t *testing.T) {
+	var gotPath, gotBody string
+	fire := firecrawlFake(t, &gotPath, &gotBody)
+	llm := newFakeUpstream(t, "llm")
+	fallback := newFakeUpstream(t, "fallback")
+
+	m := &manifest.Manifest{
+		SchemaVersion: 1,
+		Agent:         manifest.Agent{Name: "club-host"},
+		Hosts: []manifest.Host{{
+			ID: "rig-a",
+			Services: []manifest.Service{
+				{Name: "vllm", Engine: "vllm", URL: llm.URL().String(), Models: []manifest.Model{{ID: "model-a"}}},
+				{Name: "firecrawl", Type: "scrape", Engine: "other", URL: fire.URL + "/v1"},
+			},
+		}},
+	}
+	r := New(m, fallback.URL())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/scrape", strings.NewReader(`{"url":"https://ex.com/p"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if gotPath != "/v1/scrape" {
+		t.Fatalf("upstream path = %q, want /v1/scrape", gotPath)
+	}
+	if !strings.Contains(gotBody, `"formats"`) || !strings.Contains(gotBody, "markdown") {
+		t.Fatalf("agent did not request a markdown format: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"url":"https://ex.com/p"`) {
+		t.Fatalf("url not forwarded: %s", gotBody)
+	}
+	if got := w.Body.String(); got != "# Hello\n\nworld" {
+		t.Fatalf("body = %q, want the extracted markdown (not Firecrawl's JSON envelope)", got)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/markdown") {
+		t.Fatalf("content-type = %q, want text/markdown", ct)
+	}
+	if w.Header().Get("X-Scrape-Title") != "Hi" {
+		t.Fatalf("X-Scrape-Title = %q", w.Header().Get("X-Scrape-Title"))
+	}
+	if w.Header().Get("X-Scrape-Source-Url") != "https://ex.com/p" {
+		t.Fatalf("X-Scrape-Source-Url = %q", w.Header().Get("X-Scrape-Source-Url"))
+	}
+	if len(fallback.calls) != 0 {
+		t.Fatalf("fallback should not be hit, got %d calls", len(fallback.calls))
+	}
+}
+
+func TestRouter_ScrapeWithoutBackendReturns503(t *testing.T) {
+	fallback := newFakeUpstream(t, "fallback")
+	r := New(twoBackendManifest(fallback.URL().String(), fallback.URL().String()), fallback.URL())
+	req := httptest.NewRequest(http.MethodPost, "/v1/scrape", strings.NewReader(`{"url":"https://ex.com"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestRouter_ScrapeRequiresURL(t *testing.T) {
+	var gotPath, gotBody string
+	fire := firecrawlFake(t, &gotPath, &gotBody)
+	fallback := newFakeUpstream(t, "fallback")
+	m := &manifest.Manifest{
+		SchemaVersion: 1,
+		Agent:         manifest.Agent{Name: "club-host"},
+		Hosts: []manifest.Host{{ID: "rig", Services: []manifest.Service{
+			{Name: "firecrawl", Type: "scrape", Engine: "other", URL: fire.URL + "/v1"},
+		}}},
+	}
+	r := New(m, fallback.URL())
+	req := httptest.NewRequest(http.MethodPost, "/v1/scrape", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (no url)", w.Code)
+	}
+	if gotPath != "" {
+		t.Fatalf("upstream should not be called for a url-less request, hit %q", gotPath)
+	}
+}
