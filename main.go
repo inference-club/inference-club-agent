@@ -197,6 +197,36 @@ func main() {
 		}()
 	}
 
+	// Liveness beacon (phase 1): reach OUT to inference.club on an interval so
+	// the provider stays "online" as long as the agent is alive — independent
+	// of discovery mode, manifest churn, and whether the backend can reach us.
+	// register() already bumped last_seen once; this keeps it warm.
+	if cfg.HeartbeatInterval > 0 {
+		go func() {
+			tick := time.NewTicker(cfg.HeartbeatInterval)
+			defer tick.Stop()
+			var failures int
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					if err := sendHeartbeat(cfg); err != nil {
+						// Log the first failure then ~every 10th, so a flaky
+						// link doesn't flood the journal.
+						if failures%10 == 0 {
+							log.Printf("heartbeat failed: %v", err)
+						}
+						failures++
+					} else {
+						failures = 0
+					}
+				}
+			}
+		}()
+		log.Printf("liveness beacon: every %s → %s", cfg.HeartbeatInterval, cfg.BaseURL)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -329,6 +359,12 @@ type config struct {
 	DiscoveryNamespace string
 	DiscoveryInterval  time.Duration
 
+	// How often the agent beacons inference.club to stay "online". Outbound,
+	// so it works behind NAT without the backend reaching back in. See
+	// sendHeartbeat. 0 disables the beacon (falls back to register + the
+	// backend's inbound /healthz probe, the old behavior).
+	HeartbeatInterval time.Duration
+
 	mu sync.Mutex // guards Name/Hostname/ListenPort under SIGHUP reload
 }
 
@@ -350,6 +386,7 @@ func loadConfig() *config {
 		Discovery:          strings.ToLower(strings.TrimSpace(os.Getenv("AGENT_DISCOVERY"))),
 		DiscoveryNamespace: getenv("AGENT_DISCOVERY_NAMESPACE", "inference-club"),
 		DiscoveryInterval:  30 * time.Second,
+		HeartbeatInterval:  30 * time.Second,
 	}
 	if v := os.Getenv("AGENT_DISCOVERY_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -357,6 +394,18 @@ func loadConfig() *config {
 			log.Fatalf("invalid AGENT_DISCOVERY_INTERVAL (want e.g. 30s): %q", v)
 		}
 		c.DiscoveryInterval = d
+	}
+	// AGENT_HEARTBEAT_INTERVAL tunes the liveness beacon; "0"/"off" disables it.
+	if v := os.Getenv("AGENT_HEARTBEAT_INTERVAL"); v != "" {
+		if v == "0" || strings.EqualFold(v, "off") {
+			c.HeartbeatInterval = 0
+		} else {
+			d, err := time.ParseDuration(v)
+			if err != nil || d < time.Second {
+				log.Fatalf("invalid AGENT_HEARTBEAT_INTERVAL (want e.g. 30s, or 0 to disable): %q", v)
+			}
+			c.HeartbeatInterval = d
+		}
 	}
 	if v := os.Getenv("AGENT_LISTEN_PORT"); v != "" {
 		if _, err := fmt.Sscanf(v, "%d", &c.ListenPort); err != nil {
@@ -574,6 +623,37 @@ func pushManifest(cfg *config, lr *manifest.LoadResult) {
 		return
 	}
 	log.Printf("manifest uploaded (status %d)", res.StatusCode)
+}
+
+// sendHeartbeat beacons inference.club so the provider stays "online" without
+// the backend having to probe inward over the tailnet. Outbound POST with the
+// same Bearer key used to register; the server stamps last_seen_at with its own
+// receipt time. Best-effort — the caller logs and ignores failures.
+func sendHeartbeat(c *config) error {
+	if c.APIKey == "" {
+		return fmt.Errorf("INFERENCE_CLUB_API_KEY not set")
+	}
+	c.mu.Lock()
+	name := c.Name
+	c.mu.Unlock()
+	body, _ := json.Marshal(map[string]any{"name": name})
+	endpoint := strings.TrimSuffix(c.BaseURL, "/") + "/api/inference/agent/heartbeat/"
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("call heartbeat: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("heartbeat returned %d: %s", resp.StatusCode, b)
+	}
+	return nil
 }
 
 func register(c *config) (*registerResponse, error) {
