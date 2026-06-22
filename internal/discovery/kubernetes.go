@@ -72,6 +72,12 @@ type Kubernetes struct {
 	APIBase   string
 	TokenPath string
 	Client    *http.Client
+
+	// DCGMPort is the hostPort dcgm-exporter listens on for live GPU stats
+	// (VRAM, util) scraped per node in ClusterState. 0 disables GPU scraping —
+	// the zero value, so tests never touch the network. NewInCluster defaults
+	// it to 9400 (see clusters/home/monitoring/dcgm-exporter.yaml).
+	DCGMPort int
 }
 
 // NewInCluster configures discovery from the standard in-cluster environment.
@@ -97,7 +103,19 @@ func NewInCluster(agentName, namespace string) (*Kubernetes, error) {
 			Timeout:   15 * time.Second,
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
 		},
+		DCGMPort: dcgmPortFromEnv(),
 	}, nil
+}
+
+// dcgmPortFromEnv reads DCGM_SCRAPE_PORT (default 9400). Set it to "0" to
+// disable GPU scraping entirely where dcgm-exporter isn't deployed.
+func dcgmPortFromEnv() int {
+	if v := os.Getenv("DCGM_SCRAPE_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			return p
+		}
+	}
+	return 9400
 }
 
 // Build lists the cluster and assembles a validated manifest. The returned

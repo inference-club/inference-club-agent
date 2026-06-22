@@ -42,6 +42,29 @@ type NodeState struct {
 	OSImage        string          `json:"os_image,omitempty"`
 	Memory         MemoryState     `json:"memory"`
 	GPUAllocatable int             `json:"gpu_allocatable"`
+	// GPU is live VRAM/utilization from dcgm-exporter (see gpu.go). nil when
+	// the node has no reachable exporter (a2/spark today) or scraping is off —
+	// the viz degrades to the allocatable count above.
+	GPU *NodeGPU `json:"gpu,omitempty"`
+}
+
+// NodeGPU aggregates a node's GPUs for the viz: node totals plus a per-device
+// breakdown. Bytes (not MiB) so consumers don't re-scale. Mirrors the
+// frontend's LiveNode.gpu (inference.club useClusterState.ts) — keep in sync.
+type NodeGPU struct {
+	VRAMUsedBytes  int64       `json:"vram_used_bytes"`
+	VRAMTotalBytes int64       `json:"vram_total_bytes"`
+	UtilPercent    int         `json:"util_percent"` // averaged across Devices
+	Devices        []GPUDevice `json:"devices,omitempty"`
+}
+
+// GPUDevice is one physical GPU on a node.
+type GPUDevice struct {
+	Index          int    `json:"index"`
+	Model          string `json:"model,omitempty"`
+	VRAMUsedBytes  int64  `json:"vram_used_bytes"`
+	VRAMTotalBytes int64  `json:"vram_total_bytes"`
+	UtilPercent    int    `json:"util_percent"`
 }
 
 // NodeCondition mirrors the k8s node condition triple. Only non-default
@@ -130,12 +153,17 @@ func (k *Kubernetes) ClusterState(ctx context.Context) (*ClusterState, error) {
 		}
 	}
 
-	return k.assembleState(svcs.Items, pods.Items, nodes.Items, nodeUsage, podUsage, metricsOK), nil
+	// Live GPU stats (VRAM, util) from dcgm-exporter, scraped per node. Like
+	// the metrics above this is best-effort: nodes without a reachable exporter
+	// are simply absent from the map and report GPU=nil.
+	gpuByNode := k.scrapeNodeGPUs(ctx, nodes.Items)
+
+	return k.assembleState(svcs.Items, pods.Items, nodes.Items, nodeUsage, podUsage, gpuByNode, metricsOK), nil
 }
 
 // assembleState is pure mapping, kept separate so tests can drive it.
 func (k *Kubernetes) assembleState(svcs []k8sService, pods []k8sPod, nodes []k8sNode,
-	nodeUsage, podUsage map[string]int64, metricsOK bool) *ClusterState {
+	nodeUsage, podUsage map[string]int64, gpuByNode map[string]*NodeGPU, metricsOK bool) *ClusterState {
 
 	st := &ClusterState{
 		Discovery:        "kubernetes",
@@ -161,6 +189,7 @@ func (k *Kubernetes) assembleState(svcs []k8sService, pods []k8sPod, nodes []k8s
 			},
 		}
 		ns.GPUAllocatable, _ = strconv.Atoi(n.Status.Allocatable["nvidia.com/gpu"])
+		ns.GPU = gpuByNode[n.Metadata.Name]
 		for _, c := range n.Status.Conditions {
 			ns.Conditions = append(ns.Conditions, NodeCondition{
 				Type: c.Type, Status: c.Status, Reason: c.Reason,

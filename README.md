@@ -262,57 +262,35 @@ inference.club issue.
 
 ## Local development
 
-For a fast iteration loop you can run the agent and inference.club **both on
-your own machine, with no Tailscale at all**. The agent runs in *direct mode*
-(`AGENT_DIRECT=1`): instead of joining a tailnet it serves a plain-HTTP `/v1/*`
-surface on a TCP port and tells the local server to reach it directly at
-`host.docker.internal:<port>`. The same LLM services you use in prod work
-unchanged — direct mode only changes how inference.club reaches *this agent*.
+If your inference runs in a Kubernetes cluster, develop against the **exact same
+discovery path as prod** — no static `agent.yaml`. Run a second copy of the agent
+**inside the cluster** with `AGENT_DISCOVERY=kubernetes` (so it builds its manifest
+from the labeled Services, like the prod agent) but in *direct mode*
+(`AGENT_DIRECT=1`) pointed at your local inference.club:
 
 ```
-your browser ─▶ inference.club (dev, :8101) ─▶ this agent (direct, :8090) ─▶ vLLM / LM Studio / …
-                INFERENCE_DIRECT_AGENTS=True     AGENT_DIRECT=1                 (same as prod)
+your browser ─▶ inference.club (dev, :8101) ─▶ agent-dev (in-cluster, direct) ─▶ Services (ClusterIP)
+                INFERENCE_DIRECT_AGENTS=True     AGENT_DISCOVERY=kubernetes        (same as prod)
 ```
 
-The dev server must run with `INFERENCE_DIRECT_AGENTS=True` so it trusts the
-address the agent reports and skips Tailscale key minting — inference.club's
-`docker-compose.yml` already sets this.
+Because k8s discovery resolves cluster-internal Service DNS, the agent must run
+*in* the cluster; it advertises a LAN address (its node IP + a hostPort) that your
+local backend reaches, and the backend runs with `INFERENCE_DIRECT_AGENTS=True` to
+trust it. A ready-made manifest lives with the cluster config at
+`home-cluster/services/agent-dev/agent-dev.yaml` — set two values for your machine:
 
-### With Docker (recommended)
-
-A ready-made [`docker-compose.dev.yml`](./docker-compose.dev.yml) wires all of
-this up — isolated from any production agent on the same box (distinct
-container name, state volume, and host port). It documents the one-time setup
-(create a dev user + DRF API token on your local inference.club, export it as
-`INFERENCE_CLUB_API_KEY`) then:
+- `INFERENCE_CLUB_URL` → `http://<your-LAN-IP>:8101` (reserve the IP in DHCP)
+- `AGENT_ADVERTISE_HOST` → the LAN IP of the node it's pinned to
 
 ```bash
-docker compose -f docker-compose.dev.yml up --build
+kubectl apply -f agent-dev.yaml
+kubectl logs -n inference-club -l app=agent-dev -f   # → "discovered manifest from kubernetes (…)"
 ```
 
-### Without Docker (bare binary)
-
-```bash
-go build -o inference-club-agent .
-
-AGENT_DIRECT=1 \
-INFERENCE_CLUB_URL=http://localhost:8101 \
-INFERENCE_CLUB_API_KEY=<dev DRF token> \
-AGENT_ADVERTISE_HOST=localhost \
-AGENT_LISTEN_PORT=8090 \
-LOCAL_LLM_URL=http://localhost:1234/v1 \
-./inference-club-agent
-```
-
-(Use `AGENT_ADVERTISE_HOST=localhost` when the backend runs on the same host
-*outside* Docker; keep the `host.docker.internal` default when the backend runs
-in a container.)
-
-Build the production Docker image (tailnet mode):
-
-```bash
-docker build -t inference-club-agent:dev .
-```
+Your local `/v1/models` then populates from the cluster exactly as prod does. The
+agent's file-manifest mode (`agent.yaml`) still exists in the binary for standalone
+(non-Kubernetes) use — see "Service manifest" above — but the cluster is the single
+source of truth for both local and prod.
 
 ---
 
