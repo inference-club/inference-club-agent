@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+# The vram-reporter DaemonSet image (cmd/vram-reporter). Separate from the agent
+# image because it ships on every GPU node and needs a glibc base so the NVIDIA
+# container runtime's injected `nvidia-smi` (dynamically linked against the host
+# driver) actually runs — the agent's alpine base would fail to exec it.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+RUN apk add --no-cache git
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY internal/ ./internal/
+COPY cmd/ ./cmd/
+# cmd/vram-reporter imports only the stdlib, so the module graph resolves
+# without fetching the agent's deps.
+ARG TARGETOS TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /out/vram-reporter ./cmd/vram-reporter
+
+# debian-slim gives the glibc that the NVIDIA-runtime-injected nvidia-smi needs.
+# No RUN step (the reporter trusts the mounted serviceaccount CA, not system
+# certs), so the final stage is pure COPY — multi-arch builds need no qemu.
+FROM debian:bookworm-slim
+COPY --from=build /out/vram-reporter /usr/local/bin/vram-reporter
+ENTRYPOINT ["/usr/local/bin/vram-reporter"]

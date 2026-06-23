@@ -112,7 +112,7 @@ func TestAssembleStateAttachesGPU(t *testing.T) {
 	gpuByNode := map[string]*NodeGPU{
 		"a1": {VRAMUsedBytes: 16234 * mib, VRAMTotalBytes: 24080 * mib, UtilPercent: 55},
 	}
-	st := k.assembleState(nil, nil, nodes, nil, nil, gpuByNode, false)
+	st := k.assembleState(nil, nil, nodes, nil, nil, gpuByNode, nil, false)
 	if len(st.Nodes) != 2 {
 		t.Fatalf("want 2 nodes, got %d", len(st.Nodes))
 	}
@@ -130,6 +130,137 @@ func TestAssembleStateAttachesGPU(t *testing.T) {
 	}
 	if a2 == nil || a2.GPU != nil {
 		t.Errorf("a2 must have nil GPU, got %+v", a2)
+	}
+}
+
+// assembleState attributes per-process VRAM to the managed service backing the
+// pod, and sums it per pod — including when a GPU has no dcgm totals (the GPU
+// is synthesized so the processes still surface).
+func TestAssembleStateAttributesVRAMToService(t *testing.T) {
+	k := &Kubernetes{Namespace: "inference-club"}
+	nodes := []k8sNode{nodeWithIP("a1", "10.0.0.1")}
+
+	var svc k8sService
+	svc.Metadata.Name = "vllm-main"
+	svc.Spec.Selector = map[string]string{"app": "vllm"}
+
+	var pod k8sPod
+	pod.Metadata.Name = "vllm-main-abc"
+	pod.Metadata.Labels = map[string]string{"app": "vllm"}
+	pod.Spec.NodeName = "a1"
+	pod.Status.Phase = "Running"
+
+	vramByNode := map[string]*nodeVRAM{
+		"a1": {Processes: []GPUProcess{
+			{PID: 101, GPUIndex: 0, GPUUUID: "GPU-aaa", UsedBytes: 8 * 1024 * mib, Pod: "vllm-main-abc", Namespace: "inference-club"},
+			{PID: 102, GPUIndex: 0, GPUUUID: "GPU-aaa", UsedBytes: 2 * 1024 * mib, Pod: "vllm-main-abc", Namespace: "inference-club"},
+		}},
+	}
+
+	// gpuByNode nil → the node has no dcgm totals; the reporter still drives a
+	// synthesized GPU carrying the per-process breakdown.
+	st := k.assembleState([]k8sService{svc}, []k8sPod{pod}, nodes, nil, nil, nil, vramByNode, false)
+
+	if len(st.Nodes) != 1 || st.Nodes[0].GPU == nil {
+		t.Fatalf("want node a1 with a synthesized GPU, got %+v", st.Nodes)
+	}
+	procs := st.Nodes[0].GPU.Processes
+	if len(procs) != 2 {
+		t.Fatalf("want 2 processes, got %d", len(procs))
+	}
+	for _, p := range procs {
+		if p.Service != "vllm-main" {
+			t.Errorf("pid %d not attributed to its service: %+v", p.PID, p)
+		}
+	}
+	if len(st.Pods) != 1 {
+		t.Fatalf("want 1 pod, got %d", len(st.Pods))
+	}
+	if want := int64(10 * 1024 * mib); st.Pods[0].GPUVRAMUsedBytes != want {
+		t.Errorf("pod vram = %d, want %d", st.Pods[0].GPUVRAMUsedBytes, want)
+	}
+}
+
+// On a unified-memory node (no dcgm framebuffer total) the reporter's
+// per-process VRAM drives a synthesized GPU: used = sum of processes, total =
+// the node's unified memory pool, flagged unified.
+func TestAssembleStateUnifiedMemoryNode(t *testing.T) {
+	k := &Kubernetes{Namespace: "inference-club"}
+	spark := nodeWithIP("spark", "10.0.0.9")
+	spark.Status.Capacity = map[string]string{"memory": "119Gi"}
+
+	var svc k8sService
+	svc.Metadata.Name = "lmstudio"
+	svc.Spec.Selector = map[string]string{"app": "lmstudio"}
+	var pod k8sPod
+	pod.Metadata.Name = "lmstudio-xyz"
+	pod.Metadata.Labels = map[string]string{"app": "lmstudio"}
+	pod.Spec.NodeName = "spark"
+	pod.Status.Phase = "Running"
+
+	vramByNode := map[string]*nodeVRAM{
+		"spark": {
+			Processes:   []GPUProcess{{PID: 7, UsedBytes: 41 * 1024 * mib, Pod: "lmstudio-xyz"}},
+			UtilPercent: 73,
+		},
+	}
+	// gpuByNode nil → spark has no dcgm; the reporter alone drives the GPU.
+	st := k.assembleState([]k8sService{svc}, []k8sPod{pod}, []k8sNode{spark}, nil, nil, nil, vramByNode, false)
+
+	g := st.Nodes[0].GPU
+	if g == nil || !g.Unified {
+		t.Fatalf("spark GPU must be flagged unified: %+v", g)
+	}
+	if g.UtilPercent != 73 {
+		t.Errorf("unified util = %d, want reporter util 73", g.UtilPercent)
+	}
+	if g.VRAMUsedBytes != 41*1024*mib {
+		t.Errorf("unified used = %d, want %d", g.VRAMUsedBytes, 41*1024*mib)
+	}
+	if g.VRAMTotalBytes != 119*(1<<30) {
+		t.Errorf("unified total = %d, want node memory %d", g.VRAMTotalBytes, int64(119)*(1<<30))
+	}
+	if g.Processes[0].Service != "lmstudio" {
+		t.Errorf("process not attributed: %+v", g.Processes[0])
+	}
+}
+
+// A discrete GPU node without dcgm (a2): the reporter supplies a real
+// framebuffer total via nvidia-smi, so the node gets a proper VRAM bar and is
+// NOT mislabeled unified.
+func TestAssembleStateDiscreteNodeWithoutDcgm(t *testing.T) {
+	k := &Kubernetes{Namespace: "inference-club"}
+	a2 := nodeWithIP("a2", "10.0.0.2")
+	a2.Status.Capacity = map[string]string{"memory": "62Gi"} // node RAM, must NOT be used as VRAM total
+
+	var svc k8sService
+	svc.Metadata.Name = "flux2-klein"
+	svc.Spec.Selector = map[string]string{"app": "flux2"}
+	var pod k8sPod
+	pod.Metadata.Name = "flux2-klein-abc"
+	pod.Metadata.Labels = map[string]string{"app": "flux2"}
+	pod.Spec.NodeName = "a2"
+	pod.Status.Phase = "Running"
+
+	vramByNode := map[string]*nodeVRAM{
+		"a2": {
+			Processes:     []GPUProcess{{PID: 9, UsedBytes: 15 * 1024 * mib, Pod: "flux2-klein-abc"}},
+			UtilPercent:   30,
+			MemUsedBytes:  16 * 1024 * mib,
+			MemTotalBytes: 24 * 1024 * mib, // real 4090 framebuffer
+		},
+	}
+	st := k.assembleState([]k8sService{svc}, []k8sPod{pod}, []k8sNode{a2}, nil, nil, nil, vramByNode, false)
+
+	g := st.Nodes[0].GPU
+	if g == nil || g.Unified {
+		t.Fatalf("a2 must be a discrete (non-unified) GPU: %+v", g)
+	}
+	if g.VRAMTotalBytes != 24*1024*mib || g.VRAMUsedBytes != 16*1024*mib {
+		t.Errorf("a2 VRAM = %d/%d, want reporter framebuffer 16/24 GiB", g.VRAMUsedBytes, g.VRAMTotalBytes)
+	}
+	if g.UtilPercent != 30 {
+		t.Errorf("a2 util = %d, want 30", g.UtilPercent)
 	}
 }
 

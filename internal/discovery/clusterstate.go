@@ -56,6 +56,31 @@ type NodeGPU struct {
 	VRAMTotalBytes int64       `json:"vram_total_bytes"`
 	UtilPercent    int         `json:"util_percent"` // averaged across Devices
 	Devices        []GPUDevice `json:"devices,omitempty"`
+	// Unified is true for unified-memory accelerators (e.g. DGX Spark GB10),
+	// where the GPU has no separate framebuffer: nvidia-smi/dcgm report no VRAM
+	// total, so VRAMTotalBytes is the node's unified pool and VRAMUsedBytes is
+	// the sum of GPU-process memory. Lets the viz label it "unified".
+	Unified bool `json:"unified,omitempty"`
+	// Processes is the per-process VRAM breakdown on this node, each attributed
+	// to the pod (and thus managed service) holding it — the answer to "which
+	// service is using this GPU's memory", including when two services share one
+	// card. Populated from the vram-reporter DaemonSet (see vram.go); empty when
+	// the reporter isn't deployed (dcgm-only totals still render).
+	Processes []GPUProcess `json:"processes,omitempty"`
+}
+
+// GPUProcess is one process resident on a GPU. ``Service`` is resolved by the
+// agent (pod→managed service); the reporter supplies everything else. Bytes,
+// not MiB.
+type GPUProcess struct {
+	PID         int    `json:"pid"`
+	GPUIndex    int    `json:"gpu_index"`
+	GPUUUID     string `json:"gpu_uuid,omitempty"`
+	UsedBytes   int64  `json:"used_bytes"`
+	ProcessName string `json:"process_name,omitempty"`
+	Pod         string `json:"pod,omitempty"`
+	Namespace   string `json:"namespace,omitempty"`
+	Service     string `json:"service,omitempty"`
 }
 
 // GPUDevice is one physical GPU on a node.
@@ -95,6 +120,10 @@ type PodState struct {
 	Restarts         int    `json:"restarts"`
 	Reason           string `json:"reason,omitempty"` // e.g. ImagePullBackOff
 	MemoryUsageBytes int64  `json:"memory_usage_bytes"`
+	// GPUVRAMUsedBytes is the VRAM this pod's processes hold, summed across the
+	// node's GPUs (from the vram-reporter). 0 when unknown — degrade like the
+	// memory figures above rather than fail.
+	GPUVRAMUsedBytes int64 `json:"gpu_vram_used_bytes,omitempty"`
 }
 
 // metricsList is the shared shape of metrics.k8s.io node and pod LISTs —
@@ -158,12 +187,17 @@ func (k *Kubernetes) ClusterState(ctx context.Context) (*ClusterState, error) {
 	// are simply absent from the map and report GPU=nil.
 	gpuByNode := k.scrapeNodeGPUs(ctx, nodes.Items)
 
-	return k.assembleState(svcs.Items, pods.Items, nodes.Items, nodeUsage, podUsage, gpuByNode, metricsOK), nil
+	// Per-process VRAM with pod identity, from the vram-reporter DaemonSet.
+	// Best-effort and independent of dcgm — absent nodes report no processes.
+	vramByNode := k.scrapeNodeVRAM(ctx, nodes.Items)
+
+	return k.assembleState(svcs.Items, pods.Items, nodes.Items, nodeUsage, podUsage, gpuByNode, vramByNode, metricsOK), nil
 }
 
 // assembleState is pure mapping, kept separate so tests can drive it.
 func (k *Kubernetes) assembleState(svcs []k8sService, pods []k8sPod, nodes []k8sNode,
-	nodeUsage, podUsage map[string]int64, gpuByNode map[string]*NodeGPU, metricsOK bool) *ClusterState {
+	nodeUsage, podUsage map[string]int64, gpuByNode map[string]*NodeGPU,
+	vramByNode map[string]*nodeVRAM, metricsOK bool) *ClusterState {
 
 	st := &ClusterState{
 		Discovery:        "kubernetes",
@@ -171,6 +205,32 @@ func (k *Kubernetes) assembleState(svcs []k8sService, pods []k8sPod, nodes []k8s
 		MetricsAvailable: metricsOK,
 		Nodes:            []NodeState{},
 		Pods:             []PodState{},
+	}
+
+	// Which managed service each pod backs (first match wins) — used to
+	// attribute per-process VRAM to a service, and summed below into per-pod
+	// VRAM. Same selector logic the pod loop uses.
+	serviceByPod := map[string]string{}
+	for _, svc := range svcs {
+		if len(svc.Spec.Selector) == 0 {
+			continue
+		}
+		for _, p := range pods {
+			if selectorMatches(svc.Spec.Selector, p.Metadata.Labels) {
+				if _, seen := serviceByPod[p.Metadata.Name]; !seen {
+					serviceByPod[p.Metadata.Name] = svc.Metadata.Name
+				}
+			}
+		}
+	}
+	// VRAM each pod holds, summed across that pod's GPU processes on its node.
+	podVRAM := map[string]int64{}
+	for _, nv := range vramByNode {
+		for _, pr := range nv.Processes {
+			if pr.Pod != "" {
+				podVRAM[pr.Pod] += pr.UsedBytes
+			}
+		}
 	}
 
 	hostIDByNode := map[string]string{}
@@ -190,6 +250,51 @@ func (k *Kubernetes) assembleState(svcs []k8sService, pods []k8sPod, nodes []k8s
 		}
 		ns.GPUAllocatable, _ = strconv.Atoi(n.Status.Allocatable["nvidia.com/gpu"])
 		ns.GPU = gpuByNode[n.Metadata.Name]
+		// Attach per-process VRAM, each tagged with the service its pod backs.
+		// A node may have a reporter but no dcgm totals; synthesize an empty
+		// NodeGPU so the per-process detail still surfaces.
+		if nv := vramByNode[n.Metadata.Name]; nv != nil && len(nv.Processes) > 0 {
+			if ns.GPU == nil {
+				ns.GPU = &NodeGPU{}
+			}
+			enriched := make([]GPUProcess, len(nv.Processes))
+			for i, pr := range nv.Processes {
+				pr.Service = serviceByPod[pr.Pod]
+				enriched[i] = pr
+			}
+			ns.GPU.Processes = enriched
+
+			// Device-level utilization from the reporter (nvidia-smi) — the only
+			// util signal on the Spark (no dcgm) and on GeForce (no per-process
+			// util). Use it when dcgm didn't already supply one.
+			if ns.GPU.UtilPercent == 0 && nv.UtilPercent > 0 {
+				ns.GPU.UtilPercent = nv.UtilPercent
+			}
+
+			// Fill GPU memory totals when dcgm didn't (nodes without the
+			// exporter, e.g. a2 and the Spark). Two cases, distinguished by
+			// whether nvidia-smi could read a framebuffer total:
+			if ns.GPU.VRAMTotalBytes == 0 {
+				if nv.MemTotalBytes > 0 {
+					// Discrete GPU without dcgm (a2): real framebuffer from
+					// nvidia-smi — use it directly, NOT unified.
+					ns.GPU.VRAMUsedBytes = nv.MemUsedBytes
+					ns.GPU.VRAMTotalBytes = nv.MemTotalBytes
+				} else {
+					// Unified memory (DGX Spark GB10): nvidia-smi reports no
+					// framebuffer total, so the accelerator draws from the
+					// node's unified pool. Budget = node memory, used = summed
+					// per-process VRAM; flag it unified.
+					var used int64
+					for _, pr := range enriched {
+						used += pr.UsedBytes
+					}
+					ns.GPU.Unified = true
+					ns.GPU.VRAMUsedBytes = used
+					ns.GPU.VRAMTotalBytes = ns.Memory.CapacityBytes
+				}
+			}
+		}
 		for _, c := range n.Status.Conditions {
 			ns.Conditions = append(ns.Conditions, NodeCondition{
 				Type: c.Type, Status: c.Status, Reason: c.Reason,
@@ -220,6 +325,7 @@ func (k *Kubernetes) assembleState(svcs []k8sService, pods []k8sPod, nodes []k8s
 				HostID:           hostIDByNode[p.Spec.NodeName],
 				Phase:            p.Status.Phase,
 				MemoryUsageBytes: podUsage[p.Metadata.Name],
+				GPUVRAMUsedBytes: podVRAM[p.Metadata.Name],
 			}
 			ready := len(p.Status.ContainerStatuses) > 0
 			for _, cs := range p.Status.ContainerStatuses {

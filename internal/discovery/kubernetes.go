@@ -78,6 +78,12 @@ type Kubernetes struct {
 	// the zero value, so tests never touch the network. NewInCluster defaults
 	// it to 9400 (see clusters/home/monitoring/dcgm-exporter.yaml).
 	DCGMPort int
+
+	// VRAMPort is the hostPort the vram-reporter DaemonSet listens on for
+	// per-process VRAM with pod attribution (see vram.go). 0 disables the
+	// scrape — the zero value, so tests never touch the network. NewInCluster
+	// defaults it to 9401 (see clusters/home/monitoring/vram-reporter.yaml).
+	VRAMPort int
 }
 
 // NewInCluster configures discovery from the standard in-cluster environment.
@@ -104,6 +110,7 @@ func NewInCluster(agentName, namespace string) (*Kubernetes, error) {
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
 		},
 		DCGMPort: dcgmPortFromEnv(),
+		VRAMPort: vramPortFromEnv(),
 	}, nil
 }
 
@@ -116,6 +123,17 @@ func dcgmPortFromEnv() int {
 		}
 	}
 	return 9400
+}
+
+// vramPortFromEnv reads VRAM_REPORTER_PORT (default 9401). Set it to "0" to
+// disable the per-process VRAM scrape where the reporter isn't deployed.
+func vramPortFromEnv() int {
+	if v := os.Getenv("VRAM_REPORTER_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			return p
+		}
+	}
+	return 9401
 }
 
 // Build lists the cluster and assembles a validated manifest. The returned

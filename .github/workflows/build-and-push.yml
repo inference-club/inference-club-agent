@@ -19,7 +19,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
+      - name: agent image
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -27,5 +28,17 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: vram-reporter image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.vram-reporter
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-vram-reporter:latest
+            ghcr.io/${{ github.repository }}-vram-reporter:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
