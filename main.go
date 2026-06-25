@@ -292,6 +292,25 @@ func main() {
 		if _, err := srv.Up(ctx); err != nil {
 			log.Fatalf("tsnet up: %v", err)
 		}
+		// Record the node's real tailnet IP and report it right away. Tailscale
+		// may have uniquified our hostname (club-host-1 → club-host-1-1) if a
+		// stale device still held the name, so the canonical hostname the
+		// backend has on file may not resolve — but the IP always routes. The
+		// immediate heartbeat closes the gap so the backend repoints within
+		// seconds of a restart instead of waiting a full beacon interval.
+		if ip4, _ := srv.TailscaleIPs(); ip4.IsValid() {
+			cfg.mu.Lock()
+			cfg.TailnetIP = ip4.String()
+			cfg.mu.Unlock()
+			log.Printf("tailnet identity: ip=%s (hostname=%q)", ip4, cfg.Hostname)
+			go func() {
+				if err := sendHeartbeat(cfg); err != nil {
+					log.Printf("initial identity heartbeat failed (next beacon will retry): %v", err)
+				}
+			}()
+		} else {
+			log.Printf("warn: tsnet reported no tailnet IP; backend will fall back to hostname %q", cfg.Hostname)
+		}
 		listener, err = srv.Listen("tcp", fmt.Sprintf(":%d", cfg.ListenPort))
 		if err != nil {
 			log.Fatalf("listen: %v", err)
@@ -365,7 +384,14 @@ type config struct {
 	// backend's inbound /healthz probe, the old behavior).
 	HeartbeatInterval time.Duration
 
-	mu sync.Mutex // guards Name/Hostname/ListenPort under SIGHUP reload
+	// TailnetIP is this node's actual tailnet IPv4, learned from tsnet after
+	// joining. Reported on every heartbeat so the backend dials the live node
+	// directly over WireGuard — immune to Tailscale renaming the node on rejoin
+	// (club-host-1 → club-host-1-1), which the canonical-hostname dial can't
+	// survive. Empty in direct mode and until the node is up.
+	TailnetIP string
+
+	mu sync.Mutex // guards Name/Hostname/ListenPort/TailnetIP under SIGHUP reload
 }
 
 func loadConfig() *config {
@@ -635,8 +661,15 @@ func sendHeartbeat(c *config) error {
 	}
 	c.mu.Lock()
 	name := c.Name
+	ip := c.TailnetIP
 	c.mu.Unlock()
-	body, _ := json.Marshal(map[string]any{"name": name})
+	payload := map[string]any{"name": name}
+	if ip != "" {
+		// Lets the backend dial the live node by IP, surviving tailnet hostname
+		// drift on rejoin. Omitted in direct mode (no tailnet IP).
+		payload["tailnet_addr"] = ip
+	}
+	body, _ := json.Marshal(payload)
 	endpoint := strings.TrimSuffix(c.BaseURL, "/") + "/api/inference/agent/heartbeat/"
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
