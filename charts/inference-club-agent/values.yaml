@@ -18,7 +18,7 @@ apiKey:
   value: ""
 
 discovery:
-  mode: kubernetes          # kubernetes | static (static expects an agent.yaml mount you add yourself)
+  mode: kubernetes          # label-driven cluster discovery (leave as-is)
   namespace: ""             # default: the release namespace
   interval: 30s
 
