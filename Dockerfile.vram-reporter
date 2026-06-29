@@ -6,11 +6,12 @@
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 RUN apk add --no-cache git
 WORKDIR /src
-COPY go.mod go.sum ./
+# go.sum isn't committed (it's gitignored, and the agent image regenerates it on
+# the fly). cmd/vram-reporter imports only the stdlib, so the module graph
+# resolves without it — no go.sum and no `go mod tidy` needed here.
+COPY go.mod ./
 COPY internal/ ./internal/
 COPY cmd/ ./cmd/
-# cmd/vram-reporter imports only the stdlib, so the module graph resolves
-# without fetching the agent's deps.
 ARG TARGETOS TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/vram-reporter ./cmd/vram-reporter
