@@ -26,11 +26,13 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -103,6 +105,20 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(payload{Processes: procs, Devices: devices(ctx)})
 	})
+	// /metrics is the same data as /vram in Prometheus text-exposition format, so
+	// the cluster's static-scrape Prometheus (like dcgm on :9400, node-exporter
+	// on :9100) can graph per-service VRAM directly. Stdlib only.
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		procs, err := collect(ctx, kc, node)
+		if err != nil {
+			log.Printf("collect: %v", err)
+			procs = nil
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		writeMetrics(w, node, procs, devices(ctx))
+	})
 
 	addr := ":" + port
 	log.Printf("vram-reporter listening on %s (node %s)", addr, node)
@@ -156,6 +172,80 @@ func collect(ctx context.Context, kc *k8sClient, node string) ([]process, error)
 		out = append(out, pr)
 	}
 	return out, nil
+}
+
+// --- prometheus exposition --------------------------------------------------
+
+// writeMetrics renders the per-process VRAM and per-device stats as Prometheus
+// text exposition. Per-process rows are summed by
+// (gpu, uuid, namespace, pod, process_name) so series stay stable across
+// scrapes — pid is deliberately not a label (it would churn a new series on
+// every restart). Processes that couldn't be attributed to a pod report empty
+// namespace/pod, so they still count toward the GPU's total.
+func writeMetrics(w io.Writer, node string, procs []process, devs []device) {
+	type key struct {
+		gpu                  int
+		uuid, namespace, pod string
+		process              string
+	}
+	sums := map[key]int64{}
+	for _, p := range procs {
+		k := key{gpu: p.GPUIndex, uuid: p.GPUUUID, namespace: p.Namespace, pod: p.Pod, process: p.ProcessName}
+		sums[k] += p.UsedBytes
+	}
+	keys := make([]key, 0, len(sums))
+	for k := range sums {
+		keys = append(keys, k)
+	}
+	// Deterministic output makes a manual `curl :9401/metrics` readable; Prom
+	// itself doesn't care about ordering.
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		if a.namespace != b.namespace {
+			return a.namespace < b.namespace
+		}
+		if a.pod != b.pod {
+			return a.pod < b.pod
+		}
+		if a.gpu != b.gpu {
+			return a.gpu < b.gpu
+		}
+		return a.process < b.process
+	})
+
+	fmt.Fprintln(w, "# HELP vram_used_bytes GPU memory used by a pod on a GPU, in bytes (summed over the pod's processes of the same name).")
+	fmt.Fprintln(w, "# TYPE vram_used_bytes gauge")
+	for _, k := range keys {
+		fmt.Fprintf(w, "vram_used_bytes{node=\"%s\",gpu=\"%d\",gpu_uuid=\"%s\",namespace=\"%s\",pod=\"%s\",process_name=\"%s\"} %d\n",
+			esc(node), k.gpu, esc(k.uuid), esc(k.namespace), esc(k.pod), esc(k.process), sums[k])
+	}
+
+	fmt.Fprintln(w, "# HELP gpu_mem_used_bytes Device framebuffer memory used, in bytes (0 on unified-memory GB10).")
+	fmt.Fprintln(w, "# TYPE gpu_mem_used_bytes gauge")
+	for _, d := range devs {
+		fmt.Fprintf(w, "gpu_mem_used_bytes{node=\"%s\",gpu=\"%d\",gpu_uuid=\"%s\"} %d\n", esc(node), d.Index, esc(d.UUID), d.MemUsedBytes)
+	}
+
+	fmt.Fprintln(w, "# HELP gpu_mem_total_bytes Device framebuffer memory total, in bytes (0 on unified-memory GB10).")
+	fmt.Fprintln(w, "# TYPE gpu_mem_total_bytes gauge")
+	for _, d := range devs {
+		fmt.Fprintf(w, "gpu_mem_total_bytes{node=\"%s\",gpu=\"%d\",gpu_uuid=\"%s\"} %d\n", esc(node), d.Index, esc(d.UUID), d.MemTotalBytes)
+	}
+
+	fmt.Fprintln(w, "# HELP gpu_util_percent Device-level SM utilization, percent (0 where unavailable).")
+	fmt.Fprintln(w, "# TYPE gpu_util_percent gauge")
+	for _, d := range devs {
+		fmt.Fprintf(w, "gpu_util_percent{node=\"%s\",gpu=\"%d\",gpu_uuid=\"%s\"} %d\n", esc(node), d.Index, esc(d.UUID), d.UtilPercent)
+	}
+}
+
+// esc escapes a Prometheus label value: backslash, double-quote and newline,
+// per the exposition format. Returns the inner string (callers add the quotes).
+func esc(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	return s
 }
 
 // --- nvidia-smi -------------------------------------------------------------
