@@ -50,6 +50,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +62,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,6 +74,29 @@ import (
 	"github.com/briancaffey/inference-club-agent/host-agent/internal/router"
 	"tailscale.com/tsnet"
 )
+
+// Version is the agent build version, overridable via -ldflags "-X main.Version=…".
+var Version = "dev"
+
+// ControlAPIVersion identifies the /cluster/* + scale wire contract the backend
+// negotiates against (PRD 21). Bump on breaking changes.
+const ControlAPIVersion = 1
+
+// k8sNameRE guards the {name} path param on the scale route against anything
+// that isn't a plain DNS-1123 label (no slashes / traversal into other paths).
+var k8sNameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// bearerAuthorized checks a constant-time Bearer match — the agent's first
+// inbound auth, guarding the scale mutation (PRD 21).
+func bearerAuthorized(r *http.Request, token string) bool {
+	const p = "Bearer "
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, p) {
+		return false
+	}
+	got := strings.TrimSpace(h[len(p):])
+	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+}
 
 func main() {
 	if len(os.Args) > 1 {
@@ -257,6 +282,61 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(state)
 	})
+	// Build/version + capability probe — the backend checks compatibility and
+	// whether this agent can actuate before enabling park/unpark (PRD 21).
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"version":       Version,
+			"control_api":   ControlAPIVersion,
+			"scale_enabled": cfg.ScaleToken != "",
+			"agent":         cfg.Name,
+		})
+	})
+
+	// Park / unpark a managed Deployment (PRD 21). The agent's only mutation and
+	// its first inbound-authed route: requires a Bearer == AGENT_CONTROL_TOKEN,
+	// k8s discovery mode, and strictly replicas 0 or 1 (on/off, not autoscaling).
+	mux.HandleFunc("POST /cluster/deployments/{name}/scale", func(w http.ResponseWriter, r *http.Request) {
+		if kdisc == nil {
+			http.Error(w, "scaling requires kubernetes discovery mode", http.StatusNotFound)
+			return
+		}
+		if cfg.ScaleToken == "" {
+			http.Error(w, "scaling disabled — set AGENT_CONTROL_TOKEN", http.StatusNotImplemented)
+			return
+		}
+		if !bearerAuthorized(r, cfg.ScaleToken) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		name := r.PathValue("name")
+		if !k8sNameRE.MatchString(name) {
+			http.Error(w, "invalid deployment name", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Replicas *int `json:"replicas"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&body); err != nil ||
+			body.Replicas == nil || (*body.Replicas != 0 && *body.Replicas != 1) {
+			http.Error(w, "replicas must be 0 or 1", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+		defer cancel()
+		if err := kdisc.ScaleDeployment(ctx, name, *body.Replicas, cfg.Name); err != nil {
+			log.Printf("scale %s -> %d: %v", name, *body.Replicas, err)
+			http.Error(w, "scale failed", http.StatusBadGateway)
+			return
+		}
+		log.Printf("scaled deployment %s -> replicas=%d (by %q)", name, *body.Replicas, cfg.Name)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"deployment": name, "replicas": *body.Replicas, "ok": true,
+		})
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found — try /v1/models", http.StatusNotFound)
 	})
@@ -371,6 +451,12 @@ type config struct {
 	Direct        bool
 	AdvertiseHost string
 
+	// ScaleToken is the shared secret the backend must present (Bearer) to
+	// actuate park/unpark via POST /cluster/deployments/{name}/scale — the
+	// agent's FIRST inbound auth (PRD 21). Empty disables scaling entirely, so
+	// an agent is read-only unless AGENT_CONTROL_TOKEN is set.
+	ScaleToken string
+
 	// Discovery selects where the manifest comes from: "" / "static" reads
 	// AGENT_CONFIG_FILE (agent.yaml); "kubernetes" builds it from Services
 	// labeled inference-club.com/managed=true in DiscoveryNamespace.
@@ -408,6 +494,8 @@ func loadConfig() *config {
 
 		Direct:        getenvBool("AGENT_DIRECT"),
 		AdvertiseHost: getenv("AGENT_ADVERTISE_HOST", "host.docker.internal"),
+
+		ScaleToken: getenv("AGENT_CONTROL_TOKEN", ""),
 
 		Discovery:          strings.ToLower(strings.TrimSpace(os.Getenv("AGENT_DISCOVERY"))),
 		DiscoveryNamespace: getenv("AGENT_DISCOVERY_NAMESPACE", "inference-club"),
