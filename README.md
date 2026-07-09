@@ -119,6 +119,7 @@ reference. The essentials:
 | **which namespace to watch** | `discovery.namespace` (defaults to the release namespace) |
 | **which Services to publish** | the `inference-club.com/managed=true` label — [discovery guide](./docs/kubernetes-discovery.md) |
 | **tailnet identity persistence** | `persistence.enabled=true` (recommended for production) |
+| **which backend / topology** | tailnet (cloud) vs. direct (same-network / in-cluster) — [environments guide](./docs/environments.md) |
 
 After the first registration the API key is no longer used — the cached Tailscale
 auth key in the agent's state volume is sufficient. Wipe the state (or disable
