@@ -23,6 +23,14 @@ rules:
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get]
+  # Cluster control center (PRD 21): read Deployments for the parked/startable
+  # roster in /cluster/state, and patch their scale to park/unpark (0<->1).
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, patch]
+  - apiGroups: [apps]
+    resources: [deployments/scale]
+    verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

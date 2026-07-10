@@ -42,6 +42,15 @@ persistence:
   size: 1Gi
   storageClass: ""
 
+# Cluster control center (PRD 21): when enabled, the agent accepts authenticated
+# park/unpark (scale) requests on POST /cluster/deployments/{name}/scale. The
+# named secret must exist and hold the shared token; the backend Provider
+# presents the same value. Off = read-only (the safe default).
+controlToken:
+  enabled: false
+  secretName: agent-control-token
+  secretKey: token
+
 resources: {}
 nodeSelector: {}
 tolerations: []

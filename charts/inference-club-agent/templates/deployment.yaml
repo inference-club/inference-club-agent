@@ -54,6 +54,16 @@ spec:
             - name: AGENT_ADVERTISE_HOST
               value: {{ required "direct.advertiseHost is required when direct.enabled" .Values.direct.advertiseHost | quote }}
             {{- end }}
+            {{- if .Values.controlToken.enabled }}
+            # Cluster control center (PRD 21): the Bearer secret the backend must
+            # present to park/unpark via POST /cluster/deployments/{name}/scale.
+            # Its presence ENABLES scaling; without it the agent is read-only.
+            - name: AGENT_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.controlToken.secretName | quote }}
+                  key: {{ .Values.controlToken.secretKey | quote }}
+            {{- end }}
             - name: AGENT_STATE_DIR
               value: /var/lib/club-host
           volumeMounts:
