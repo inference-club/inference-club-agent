@@ -231,7 +231,7 @@ office), users may want to tag them. Skip until someone asks.
 
 So we don't drift:
 
-- **Anything other than LLM inference.** No TTS, no image generation,
+- **(Historical — superseded.)** Anything other than LLM inference. No TTS, no image generation,
   no video, no embeddings, no audio transcription. Each of those is
   worth doing eventually, but only after the LLM path is solid and we
   have real users on it. Adding a `modality` field to the YAML is a

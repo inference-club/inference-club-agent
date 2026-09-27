@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -34,6 +36,12 @@ import (
 // body — so large multimodal requests route correctly, they just allocate a
 // bit more. Sized to fit text-only turns without a second read.
 const MaxCompletionBodyBytes = 1 << 20 // 1 MiB
+
+// MaxImageBodyBytes is the initial read-buffer size for an inbound image
+// generation/edit body. Edits are multipart with up to ten reference images,
+// so start bigger than a chat turn; like completions, readCappedBody drains
+// anything past it and the whole body is replayed to the chosen backend.
+const MaxImageBodyBytes = 8 << 20 // 8 MiB
 
 // modelEntry is one item in the OpenAI-format /v1/models response.
 type modelEntry struct {
@@ -70,6 +78,7 @@ type Router struct {
 	fallback     *backend
 	backends     []*backend // ordered, deduped by URL
 	byModel      map[string]*backend
+	modelType    map[string]string   // served model id → service type
 	byType       map[string]*backend // service type ("stt"/"tts") → first backend
 	manifestData modelsResponse      // pre-built /v1/models payload
 }
@@ -87,9 +96,10 @@ func New(m *manifest.Manifest, fallbackURL *url.URL) *Router {
 // back to the HuggingFace value or blank.
 func NewWithProbe(m *manifest.Manifest, fallbackURL *url.URL, ctxLens map[string]int) *Router {
 	r := &Router{
-		fallback: newBackend("fallback", fallbackURL, ""),
-		byModel:  map[string]*backend{},
-		byType:   map[string]*backend{},
+		fallback:  newBackend("fallback", fallbackURL, ""),
+		byModel:   map[string]*backend{},
+		modelType: map[string]string{},
+		byType:    map[string]*backend{},
 	}
 
 	// Aggregate models response from manifest declarations. Dedupe model
@@ -141,6 +151,7 @@ func NewWithProbe(m *manifest.Manifest, fallbackURL *url.URL, ctxLens map[string
 					}
 					seenModels[served] = struct{}{}
 					r.byModel[served] = b
+					r.modelType[served] = svc.ServiceType()
 					entry := modelEntry{ID: served, Object: "model", Created: now, OwnedBy: svc.Name}
 					if n, ok := ctxLens[served]; ok && n > 0 {
 						v := n
@@ -262,7 +273,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		r.serveByType(w, req, "stt")
 	case req.Method == http.MethodPost &&
 		(req.URL.Path == "/v1/images/generations" || req.URL.Path == "/v1/images/edits"):
-		r.serveByType(w, req, "image")
+		r.serveImages(w, req)
 	case req.URL.Path == "/v1/audio/synthesize" || req.URL.Path == "/v1/audio/list_voices":
 		// Text-to-speech: the inference.club backend adapts the OpenAI
 		// /v1/audio/speech request to the NVIDIA Riva synthesize / list_voices
@@ -321,6 +332,67 @@ func (r *Router) serveByType(w http.ResponseWriter, req *http.Request, serviceTy
 	}
 	w.Header().Set("X-Inference-Club-Backend", target.name)
 	target.proxy.ServeHTTP(w, req)
+}
+
+// serveImages routes /v1/images/generations (JSON) and /v1/images/edits
+// (multipart) by the request's model field, so two image services on one
+// agent (say flux2-klein on a2 and qwen-image on spark) each get their own
+// traffic. The body is buffered and replayed. A missing or unknown model —
+// or a model served by a non-image service — falls back to the first
+// image-typed backend, which is what serveByType always did.
+func (r *Router) serveImages(w http.ResponseWriter, req *http.Request) {
+	body, _, err := readCappedBody(req.Body, MaxImageBodyBytes)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("read request body: %v", err), http.StatusBadRequest)
+		return
+	}
+	_ = req.Body.Close()
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	req.Header.Set("X-Inference-Club-Body-Buffered", "1")
+
+	target := r.fallback
+	if b, ok := r.byType["image"]; ok {
+		target = b
+	}
+	if model := peekModel(req.Header.Get("Content-Type"), body); model != "" {
+		if b, ok := r.byModel[model]; ok && r.modelType[model] == "image" {
+			target = b
+		}
+	}
+	w.Header().Set("X-Inference-Club-Backend", target.name)
+	target.proxy.ServeHTTP(w, req)
+}
+
+// peekModel returns the "model" field of a JSON object body or of a
+// multipart/form-data body, or "" when there is none. It never fails: an
+// unparseable body just routes like a body without a model.
+func peekModel(contentType string, body []byte) string {
+	mediaType, params, _ := mime.ParseMediaType(contentType)
+	if mediaType == "multipart/form-data" {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return ""
+		}
+		mr := multipart.NewReader(bytes.NewReader(body), boundary)
+		for {
+			part, err := mr.NextPart()
+			if err != nil {
+				return ""
+			}
+			if part.FormName() == "model" && part.FileName() == "" {
+				v, _ := io.ReadAll(io.LimitReader(part, 1024))
+				return strings.TrimSpace(string(v))
+			}
+		}
+	}
+	var probe struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return ""
+	}
+	return probe.Model
 }
 
 // serveMesh forwards an image-to-3D request to the mesh backend. Unlike the

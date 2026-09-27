@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -252,6 +253,71 @@ func TestRouter_RoutesImagesToImageBackend(t *testing.T) {
 	}
 	if len(llm.calls) != 0 || len(fallback.calls) != 0 {
 		t.Fatalf("image requests leaked to llm=%d fallback=%d", len(llm.calls), len(fallback.calls))
+	}
+}
+
+// With two image services on one agent, generations (JSON) and edits
+// (multipart) must follow the request's model; an unknown model keeps the old
+// first-image-backend behaviour.
+func TestRouter_RoutesImagesByModel(t *testing.T) {
+	flux := newFakeUpstream(t, "flux")
+	qwen := newFakeUpstream(t, "qwen")
+	fallback := newFakeUpstream(t, "fallback")
+	m := &manifest.Manifest{
+		SchemaVersion: 1,
+		Agent:         manifest.Agent{Name: "club-host"},
+		Hosts: []manifest.Host{
+			{ID: "a2", Services: []manifest.Service{
+				{Name: "flux2-klein", Type: "image", Engine: "other", URL: flux.URL().String(), Models: []manifest.Model{{ID: "flux-2-klein"}}},
+			}},
+			{ID: "spark", Services: []manifest.Service{
+				{Name: "qwen-image", Type: "image", Engine: "other", URL: qwen.URL().String(), Models: []manifest.Model{{ID: "qwen-image-2.1"}}},
+			}},
+		},
+	}
+	r := New(m, fallback.URL())
+
+	send := func(path, ctype string, body []byte) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+		req.Header.Set("Content-Type", ctype)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", path, w.Code)
+		}
+	}
+
+	// JSON generation names the second image model → qwen.
+	send("/v1/images/generations", "application/json", []byte(`{"model":"qwen-image-2.1","prompt":"x"}`))
+	if len(qwen.calls) != 1 || len(flux.calls) != 0 {
+		t.Fatalf("generation by model: qwen=%d flux=%d", len(qwen.calls), len(flux.calls))
+	}
+
+	// Multipart edit with a model field and a file part → qwen, body intact.
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("prompt", "make it blue")
+	fw, _ := mw.CreateFormFile("image", "ref.png")
+	_, _ = fw.Write([]byte("not-really-a-png"))
+	_ = mw.WriteField("model", "qwen-image-2.1")
+	_ = mw.Close()
+	send("/v1/images/edits", mw.FormDataContentType(), buf.Bytes())
+	if len(qwen.calls) != 2 || len(flux.calls) != 0 {
+		t.Fatalf("edit by model: qwen=%d flux=%d", len(qwen.calls), len(flux.calls))
+	}
+	if got := qwen.calls[1].body; !strings.Contains(got, "not-really-a-png") {
+		t.Fatalf("edit body not replayed intact: %q", got)
+	}
+
+	// The first image model, and no model at all, both land on flux.
+	send("/v1/images/generations", "application/json", []byte(`{"model":"flux-2-klein","prompt":"x"}`))
+	send("/v1/images/generations", "application/json", []byte(`{"prompt":"x"}`))
+	if len(flux.calls) != 2 || len(qwen.calls) != 2 {
+		t.Fatalf("first/none: flux=%d qwen=%d", len(flux.calls), len(qwen.calls))
+	}
+	if len(fallback.calls) != 0 {
+		t.Fatalf("image requests leaked to fallback=%d", len(fallback.calls))
 	}
 }
 
