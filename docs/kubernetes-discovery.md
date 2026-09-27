@@ -285,9 +285,9 @@ change. Routing per type:
 | `scrape` | `/v1/scrape` (URL → markdown) |
 
 ```yaml
-# image example
+# image example (Qwen-Image 2.1 on the home cluster)
 metadata:
-  name: my-image
+  name: qwen-image
   labels:
     inference-club.com/managed: "true"
     inference-club.com/type: image
@@ -295,10 +295,26 @@ metadata:
   annotations:
     inference-club.com/base-path: /v1
     inference-club.com/models: |
-      - id: my-image-model
+      - id: qwen-image-2.1
+        name: Qwen-Image 2.1
         input_modalities: [text, image]
         output_modalities: [image]
+        # per-model features inference.club uses to gate playground controls
+        features: [image-edit, multi-reference, transparent-background,
+                   negative-prompt, seed, steps, custom-size]
 ```
+
+Several image services can share one agent: `/v1/images/generations` (JSON)
+and `/v1/images/edits` (multipart) are routed by the request's `model`
+field, so `flux-2-klein` and `qwen-image-2.1` each reach their own backend.
+A request without a model, or naming a model no image service declares,
+goes to the first image service found (sorted by host id, then name).
+
+Image feature names inference.club understands today: `image-edit`
+(accepts reference images), `multi-reference` (several references in one
+edit), `transparent-background` (honours `background: transparent`),
+`negative-prompt` (+ `guidance`), `seed`, `steps`, `custom-size` (any
+`WxH` up to the model's limit, not just the presets).
 
 > Some async backends (e.g. music/video servers) expose their API at the root,
 > not under `/v1`. In that case **omit `base-path`** and the agent uses the

@@ -2,12 +2,54 @@ package discovery
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// TestMapDeployments drives the control-center roster mapping (PRD 21) from raw
+// k8s JSON, so it exercises the struct tags and the selector-scoping together:
+// only Deployments backing a managed Service surface, two Deployments can back
+// one Service on different boxes (dia-a2 / dia-a3), and a parked (replicas 0)
+// Deployment still appears — the whole reason this exists.
+func TestMapDeployments(t *testing.T) {
+	const depsJSON = `{"items":[
+		{"metadata":{"name":"flux2-klein"},"spec":{"replicas":0,"template":{"metadata":{"labels":{"app":"flux2-klein"}},"spec":{"nodeSelector":{"inference-club.com/box":"a2"},"containers":[{"image":"ghcr.io/x/flux:v1","resources":{"limits":{"nvidia.com/gpu":"1"}}}]}}},"status":{"readyReplicas":0}},
+		{"metadata":{"name":"dia-a2","annotations":{"inference-club.com/last-scaled-by":"club-host"}},"spec":{"replicas":1,"template":{"metadata":{"labels":{"app":"dia"}},"spec":{"nodeSelector":{"inference-club.com/box":"a2"},"containers":[{"image":"ghcr.io/x/dia:latest","resources":{"limits":{"nvidia.com/gpu":"1"}}}]}}},"status":{"readyReplicas":1}},
+		{"metadata":{"name":"dia-a3"},"spec":{"replicas":1,"template":{"metadata":{"labels":{"app":"dia"}},"spec":{"nodeSelector":{"inference-club.com/box":"a3"}}}},"status":{"readyReplicas":1}},
+		{"metadata":{"name":"firecrawl-redis"},"spec":{"replicas":1,"template":{"metadata":{"labels":{"app":"firecrawl-redis"}}}}}
+	]}`
+	var dl deploymentList
+	if err := json.Unmarshal([]byte(depsJSON), &dl); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	svcs := make([]k8sService, 2)
+	svcs[0].Metadata.Name = "flux2-klein"
+	svcs[0].Spec.Selector = map[string]string{"app": "flux2-klein"}
+	svcs[1].Metadata.Name = "dia"
+	svcs[1].Spec.Selector = map[string]string{"app": "dia"}
+
+	got := mapDeployments(dl.Items, svcs)
+	if len(got) != 3 { // firecrawl-redis backs no managed service → excluded
+		t.Fatalf("want 3 deployments, got %d: %+v", len(got), got)
+	}
+	by := map[string]DeploymentState{}
+	for _, d := range got {
+		by[d.Name] = d
+	}
+	if d := by["flux2-klein"]; d.Service != "flux2-klein" || d.Box != "a2" || d.DesiredReplicas != 0 || d.ReadyReplicas != 0 || !d.GPU {
+		t.Errorf("flux2-klein (parked, gpu) = %+v", d)
+	}
+	if d := by["dia-a2"]; d.Service != "dia" || d.Box != "a2" || d.DesiredReplicas != 1 || d.ReadyReplicas != 1 || d.LastScaledBy != "club-host" {
+		t.Errorf("dia-a2 = %+v", d)
+	}
+	if d := by["dia-a3"]; d.Service != "dia" || d.Box != "a3" {
+		t.Errorf("dia-a3 (second deployment for same service) = %+v", d)
+	}
+}
 
 func TestClusterState(t *testing.T) {
 	srv := fixtureAPI(t)

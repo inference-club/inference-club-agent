@@ -25,12 +25,14 @@
 package discovery
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -413,6 +415,56 @@ func (k *Kubernetes) get(ctx context.Context, path string, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+// patchMerge sends an authenticated JSON merge-patch. Unlike get() this WRITES,
+// so it is used only by ScaleDeployment (the control center's park/unpark) and
+// needs the apps/deployments(/scale) patch RBAC the read path never required.
+func (k *Kubernetes) patchMerge(ctx context.Context, path string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, k.APIBase+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/merge-patch+json")
+	if k.TokenPath != "" {
+		tok, err := os.ReadFile(k.TokenPath)
+		if err != nil {
+			return fmt.Errorf("read serviceaccount token: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tok)))
+	}
+	resp, err := k.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("PATCH %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+// ScaleDeployment parks (replicas=0) or unparks (replicas=1) a Deployment via
+// the scale subresource, then best-effort stamps who did it so every
+// environment's control center can show "last scaled by X" (PRD 21 §4.3).
+// actor is the agent's own name — i.e. which environment issued the change.
+func (k *Kubernetes) ScaleDeployment(ctx context.Context, name string, replicas int, actor string) error {
+	scale := []byte(fmt.Sprintf(`{"spec":{"replicas":%d}}`, replicas))
+	if err := k.patchMerge(ctx, "/apis/apps/v1/namespaces/"+k.Namespace+"/deployments/"+name+"/scale", scale); err != nil {
+		return err
+	}
+	action := "park"
+	if replicas > 0 {
+		action = "unpark"
+	}
+	stamp, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{
+		"inference-club.com/last-scaled-by": actor,
+		"inference-club.com/last-scaled-at": time.Now().UTC().Format(time.RFC3339),
+		"inference-club.com/last-action":    action,
+	}}})
+	_ = k.patchMerge(ctx, "/apis/apps/v1/namespaces/"+k.Namespace+"/deployments/"+name, stamp) // best-effort
+	return nil
+}
+
 func (k *Kubernetes) secretAPIKey(ctx context.Context, name string) (string, error) {
 	var s k8sSecret
 	if err := k.get(ctx, "/api/v1/namespaces/"+k.Namespace+"/secrets/"+name, &s); err != nil {
@@ -492,6 +544,31 @@ type k8sEndpointSlice struct {
 	Endpoints []struct {
 		Addresses []string `json:"addresses"`
 	} `json:"endpoints"`
+}
+
+type deploymentList struct {
+	Items []k8sDeployment `json:"items"`
+}
+type k8sDeployment struct {
+	Metadata objectMeta `json:"metadata"`
+	Spec     struct {
+		Replicas *int `json:"replicas"`
+		Template struct {
+			Metadata objectMeta `json:"metadata"`
+			Spec     struct {
+				NodeSelector map[string]string `json:"nodeSelector"`
+				Containers   []struct {
+					Image     string `json:"image"`
+					Resources struct {
+						Limits map[string]string `json:"limits"`
+					} `json:"resources"`
+				} `json:"containers"`
+			} `json:"spec"`
+		} `json:"template"`
+	} `json:"spec"`
+	Status struct {
+		ReadyReplicas int `json:"readyReplicas"`
+	} `json:"status"`
 }
 
 type nodeList struct {

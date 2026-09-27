@@ -24,11 +24,30 @@ import (
 // contract: the backend proxies it verbatim and the frontend's
 // ClusterSnapshot types mirror it — keep the three in sync.
 type ClusterState struct {
-	Discovery        string      `json:"discovery"` // always "kubernetes"
-	CollectedAt      time.Time   `json:"collected_at"`
-	MetricsAvailable bool        `json:"metrics_available"`
-	Nodes            []NodeState `json:"nodes"`
-	Pods             []PodState  `json:"pods"`
+	Discovery        string            `json:"discovery"` // always "kubernetes"
+	CollectedAt      time.Time         `json:"collected_at"`
+	MetricsAvailable bool              `json:"metrics_available"`
+	Nodes            []NodeState       `json:"nodes"`
+	Pods             []PodState        `json:"pods"`
+	Deployments      []DeploymentState `json:"deployments"`
+}
+
+// DeploymentState is the desired-vs-actual view of one managed inference
+// Deployment — the unit the control center parks/unparks (PRD 21). Unlike Pods,
+// which vanish at replicas=0, a Deployment persists while parked, so this is
+// what surfaces the "parked, startable" roster (the pods list can't). Emitted
+// for every Deployment whose pod template backs a managed Service; best-effort
+// (empty when the agent lacks apps/deployments read RBAC).
+type DeploymentState struct {
+	Name            string `json:"name"`
+	Service         string `json:"service,omitempty"` // managed Service it backs
+	Box             string `json:"box,omitempty"`     // nodeSelector inference-club.com/box
+	DesiredReplicas int    `json:"desired_replicas"`
+	ReadyReplicas   int    `json:"ready_replicas"`
+	Image           string `json:"image,omitempty"`
+	GPU             bool   `json:"gpu"` // claims nvidia.com/gpu
+	LastScaledBy    string `json:"last_scaled_by,omitempty"`
+	LastScaledAt    string `json:"last_scaled_at,omitempty"`
 }
 
 // NodeState is the live view of one cluster node.
@@ -191,7 +210,68 @@ func (k *Kubernetes) ClusterState(ctx context.Context) (*ClusterState, error) {
 	// Best-effort and independent of dcgm — absent nodes report no processes.
 	vramByNode := k.scrapeNodeVRAM(ctx, nodes.Items)
 
-	return k.assembleState(svcs.Items, pods.Items, nodes.Items, nodeUsage, podUsage, gpuByNode, vramByNode, metricsOK), nil
+	st := k.assembleState(svcs.Items, pods.Items, nodes.Items, nodeUsage, podUsage, gpuByNode, vramByNode, metricsOK)
+
+	// Managed Deployments — the desired/parked state the control center actuates
+	// (PRD 21). Best-effort: a read-only agent without apps/deployments RBAC
+	// still returns the node/pod snapshot above, just with no parked roster.
+	st.Deployments = []DeploymentState{}
+	var deps deploymentList
+	if err := k.get(ctx, "/apis/apps/v1/namespaces/"+k.Namespace+"/deployments", &deps); err != nil {
+		// don't fail the whole snapshot — the read path may lack apps RBAC yet
+		_ = err
+	} else {
+		st.Deployments = mapDeployments(deps.Items, svcs.Items)
+	}
+	return st, nil
+}
+
+// mapDeployments reports every Deployment whose pod template backs a managed
+// Service (selector ⊆ template labels) — including those scaled to 0, which is
+// the whole point (the pods list can't show a parked service). Two Deployments
+// can back one Service on different boxes (e.g. dia-a2 + dia-a3); both surface,
+// distinguished by Box, because park/unpark targets a Deployment, not a Service.
+func mapDeployments(deps []k8sDeployment, svcs []k8sService) []DeploymentState {
+	out := []DeploymentState{}
+	for _, d := range deps {
+		tmpl := d.Spec.Template.Metadata.Labels
+		svcName := ""
+		for _, s := range svcs {
+			if len(s.Spec.Selector) > 0 && selectorMatches(s.Spec.Selector, tmpl) {
+				svcName = s.Metadata.Name
+				break
+			}
+		}
+		if svcName == "" {
+			continue // not a managed inference deployment
+		}
+		desired := 1
+		if d.Spec.Replicas != nil {
+			desired = *d.Spec.Replicas
+		}
+		image, gpu := "", false
+		for _, c := range d.Spec.Template.Spec.Containers {
+			if image == "" {
+				image = c.Image
+			}
+			if _, ok := c.Resources.Limits["nvidia.com/gpu"]; ok {
+				gpu = true
+			}
+		}
+		out = append(out, DeploymentState{
+			Name:            d.Metadata.Name,
+			Service:         svcName,
+			Box:             d.Spec.Template.Spec.NodeSelector[labelBox],
+			DesiredReplicas: desired,
+			ReadyReplicas:   d.Status.ReadyReplicas,
+			Image:           image,
+			GPU:             gpu,
+			LastScaledBy:    d.Metadata.Annotations["inference-club.com/last-scaled-by"],
+			LastScaledAt:    d.Metadata.Annotations["inference-club.com/last-scaled-at"],
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // assembleState is pure mapping, kept separate so tests can drive it.
