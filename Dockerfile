@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Multi-arch: the Go toolchain cross-compiles on the build host (no qemu),
 # so --platform linux/amd64,linux/arm64 builds stay fast.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 RUN apk add --no-cache git
 WORKDIR /src
 COPY go.mod ./
