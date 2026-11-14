@@ -400,6 +400,70 @@ func TestRouter_RoutesTtsToTtsBackend(t *testing.T) {
 	}
 }
 
+// With Dia (voice-cloning tts) discovered BEFORE a plain Riva tts service,
+// the Riva paths must still reach Riva, and /v1/voice/generations must still
+// reach Dia. Regression: both landed on Dia and 404'd.
+func TestRouter_TtsPrefersRivaOverVoiceCloner(t *testing.T) {
+	dia := newFakeUpstream(t, "dia")
+	riva := newFakeUpstream(t, "riva")
+	fallback := newFakeUpstream(t, "fallback")
+	m := &manifest.Manifest{
+		SchemaVersion: 1,
+		Agent:         manifest.Agent{Name: "club-host"},
+		Hosts: []manifest.Host{{
+			ID: "rig-a",
+			Services: []manifest.Service{
+				{Name: "dia", Type: "tts", Engine: "other", URL: dia.URL().String(),
+					Features: []string{"voice-cloning"}, Models: []manifest.Model{{ID: "dia-1.6b"}}},
+				{Name: "riva", Type: "tts", Engine: "other", URL: riva.URL().String(), Models: []manifest.Model{{ID: "magpie"}}},
+			},
+		}},
+	}
+	r := New(m, fallback.URL())
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/audio/synthesize"},
+		{http.MethodGet, "/v1/audio/list_voices"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(""))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if got := w.Header().Get("X-Inference-Club-Backend"); got != "riva" {
+			t.Fatalf("%s routed to %q, want riva", tc.path, got)
+		}
+	}
+	if len(riva.calls) != 2 {
+		t.Fatalf("riva calls = %d, want 2", len(riva.calls))
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/voice/generations", strings.NewReader(""))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if got := w.Header().Get("X-Inference-Club-Backend"); got != "dia" {
+		t.Fatalf("/v1/voice/generations routed to %q, want dia", got)
+	}
+}
+
+// A lone voice-cloning tts service still owns the tts slot (nothing better).
+func TestRouter_TtsLoneVoiceClonerKeepsSlot(t *testing.T) {
+	dia := newFakeUpstream(t, "dia")
+	fallback := newFakeUpstream(t, "fallback")
+	m := &manifest.Manifest{
+		SchemaVersion: 1,
+		Hosts: []manifest.Host{{ID: "rig-a", Services: []manifest.Service{
+			{Name: "dia", Type: "tts", Engine: "other", URL: dia.URL().String(),
+				Features: []string{"voice-cloning"}, Models: []manifest.Model{{ID: "dia-1.6b"}}},
+		}}},
+	}
+	r := New(m, fallback.URL())
+	req := httptest.NewRequest(http.MethodGet, "/v1/audio/list_voices", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if got := w.Header().Get("X-Inference-Club-Backend"); got != "dia" {
+		t.Fatalf("list_voices routed to %q, want dia", got)
+	}
+}
+
 func TestNewWithProbe_SetsMaxModelLen(t *testing.T) {
 	a := newFakeUpstream(t, "a")
 	b := newFakeUpstream(t, "b")

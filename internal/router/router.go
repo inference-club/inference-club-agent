@@ -110,6 +110,7 @@ func NewWithProbe(m *manifest.Manifest, fallbackURL *url.URL, ctxLens map[string
 
 	if m != nil {
 		urlToBackend := map[string]*backend{}
+		ttsCloner := map[*backend]bool{} // tts backends that advertise voice-cloning
 		for _, h := range m.Hosts {
 			for _, svc := range h.Services {
 				bURL, err := url.Parse(svc.URL)
@@ -128,14 +129,22 @@ func NewWithProbe(m *manifest.Manifest, fallbackURL *url.URL, ctxLens map[string
 				// TTS) endpoints route by type, not by model: the request is
 				// multipart, so we don't peek a JSON model field.
 				if st := svc.ServiceType(); st != "llm" {
-					if _, seen := r.byType[st]; !seen {
+					cloner := st == "tts" && hasFeature(svc.Features, "voice-cloning")
+					// The "tts" slot serves the Riva paths (/v1/audio/synthesize,
+					// /v1/audio/list_voices). A voice-cloning service (Dia)
+					// doesn't implement them — it has its own "voice" slot — so
+					// a plain Riva tts service takes the slot even if the cloner
+					// was discovered first. Otherwise every Riva request 404s on
+					// Dia whenever both run on one agent.
+					if cur, seen := r.byType[st]; !seen || (st == "tts" && ttsCloner[cur] && !cloner) {
 						r.byType[st] = b
 					}
 					// A tts service that advertises voice-cloning (Dia) also
 					// answers the dedicated /v1/voice/generations path. Index it
 					// under a synthetic "voice" type so it's chosen over a plain
 					// Riva tts service sharing the box.
-					if st == "tts" && hasFeature(svc.Features, "voice-cloning") {
+					if cloner {
+						ttsCloner[b] = true
 						if _, seen := r.byType["voice"]; !seen {
 							r.byType["voice"] = b
 						}
