@@ -270,6 +270,19 @@ spec:
       port: 9000
 ```
 
+A `tts` service answers the two NVIDIA Riva speech paths under its base path:
+`POST /audio/synthesize` (multipart `text`, `language`, `voice`,
+`sample_rate_hz`, `encoding`) and `GET /audio/list_voices`. Any server that
+implements them fits, not only a Riva NIM.
+
+Several `tts` services can share one agent (say a GPU NIM and a small CPU
+model). The agent routes both paths by model: it reads `?model=<id>` (which
+inference.club sends), or a `model` form field on a POST, and forwards to the
+service whose `inference-club.com/models` declares that id. A request with no
+model, or an unknown one, goes to the first plain `tts` service. A service that
+advertises `voice-cloning` (Dia) is reached through `/v1/voice/generations`
+instead and never takes the Riva paths from a plain `tts` service.
+
 ### Other generative types
 
 The same pattern covers the rest — only the `type` label and the model `id`
