@@ -267,8 +267,10 @@ func newBackend(name string, target *url.URL, apiKey string) *backend {
 //     streamed through untouched), or the fallback if none is declared.
 //   - POST /v1/images/generations|edits → the image-typed backend (JSON or
 //     multipart streamed through), or the fallback if none is declared.
-//   - /v1/audio/synthesize | /v1/audio/list_voices → the tts-typed backend
-//     (the NVIDIA Riva speech paths the backend adapts /v1/audio/speech to).
+//   - /v1/audio/synthesize | /v1/audio/list_voices → the tts backend that
+//     serves the request's model (?model=, or a `model` form field), else
+//     the first tts-typed backend (the NVIDIA Riva speech paths the backend
+//     adapts /v1/audio/speech to).
 //   - POST /v1/3d/generations → the mesh-typed backend, remapped to TRELLIS.2's
 //     POST /generate (multipart streamed through), or the fallback if none.
 //   - everything else under /v1/ → the fallback.
@@ -286,8 +288,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case req.URL.Path == "/v1/audio/synthesize" || req.URL.Path == "/v1/audio/list_voices":
 		// Text-to-speech: the inference.club backend adapts the OpenAI
 		// /v1/audio/speech request to the NVIDIA Riva synthesize / list_voices
-		// paths, which we forward to the tts service.
-		r.serveByType(w, req, "tts")
+		// paths, which we forward to the tts service — the one serving the
+		// request's model when several tts services share the agent.
+		r.serveTTS(w, req)
 	case req.Method == http.MethodPost && req.URL.Path == "/v1/3d/generations":
 		// Image-to-3D: the multipart image+options request goes to the mesh
 		// service, remapped to TRELLIS.2's single POST /generate endpoint.
@@ -366,6 +369,41 @@ func (r *Router) serveImages(w http.ResponseWriter, req *http.Request) {
 	}
 	if model := peekModel(req.Header.Get("Content-Type"), body); model != "" {
 		if b, ok := r.byModel[model]; ok && r.modelType[model] == "image" {
+			target = b
+		}
+	}
+	w.Header().Set("X-Inference-Club-Backend", target.name)
+	target.proxy.ServeHTTP(w, req)
+}
+
+// serveTTS routes the Riva speech paths (/v1/audio/synthesize,
+// /v1/audio/list_voices) by model, so two plain tts services on one agent
+// (say the Magpie NIM on a GPU box and nano-edge-tts on a CPU box) each get
+// their own traffic. The model comes from the `model` query parameter — the
+// NIM ignores unknown query parameters, so it is safe to send to either — or,
+// on a POST, from a `model` field of the form body (buffered and replayed; a
+// synthesize body is a few KB of text). A missing or unknown model — or one
+// served by a non-tts service — falls back to the tts slot, which is what
+// serveByType always did.
+func (r *Router) serveTTS(w http.ResponseWriter, req *http.Request) {
+	target := r.fallback
+	if b, ok := r.byType["tts"]; ok {
+		target = b
+	}
+	model := req.URL.Query().Get("model")
+	if model == "" && req.Method == http.MethodPost && req.Body != nil {
+		body, _, err := readCappedBody(req.Body, MaxImageBodyBytes)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("read request body: %v", err), http.StatusBadRequest)
+			return
+		}
+		_ = req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		req.ContentLength = int64(len(body))
+		model = peekModel(req.Header.Get("Content-Type"), body)
+	}
+	if model != "" {
+		if b, ok := r.byModel[model]; ok && r.modelType[model] == "tts" {
 			target = b
 		}
 	}

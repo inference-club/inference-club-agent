@@ -823,3 +823,73 @@ func TestRouter_ScrapeRequiresURL(t *testing.T) {
 		t.Fatalf("upstream should not be called for a url-less request, hit %q", gotPath)
 	}
 }
+
+// Two plain tts services on one agent: the Riva paths route by model
+// (?model= or a multipart `model` field); no/unknown model keeps the tts slot.
+func TestRouter_TtsRoutesByModel(t *testing.T) {
+	magpie := newFakeUpstream(t, "magpie")
+	nano := newFakeUpstream(t, "nano")
+	llm := newFakeUpstream(t, "llm")
+	fallback := newFakeUpstream(t, "fallback")
+	m := &manifest.Manifest{
+		Hosts: []manifest.Host{{
+			ID: "h",
+			Services: []manifest.Service{
+				{Name: "llm", Type: "llm", Engine: "vllm", URL: llm.URL().String(), Models: []manifest.Model{{ID: "chat"}}},
+				{Name: "magpie", Type: "tts", Engine: "other", URL: magpie.URL().String(), Models: []manifest.Model{{ID: "magpie-tts-multilingual"}}},
+				{Name: "nano", Type: "tts", Engine: "other", URL: nano.URL().String(), Models: []manifest.Model{{ID: "nano-edge-tts"}}},
+			},
+		}},
+	}
+	r := New(m, fallback.URL())
+	multipartBody := func(model string) (string, string) {
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		_ = mw.WriteField("text", "hello")
+		if model != "" {
+			_ = mw.WriteField("model", model)
+		}
+		_ = mw.Close()
+		return buf.String(), mw.FormDataContentType()
+	}
+	cases := []struct {
+		name, method, target, formModel string
+		wantNano                        bool
+	}{
+		{"synthesize ?model=nano", http.MethodPost, "/v1/audio/synthesize?model=nano-edge-tts", "", true},
+		{"synthesize ?model=magpie", http.MethodPost, "/v1/audio/synthesize?model=magpie-tts-multilingual", "", false},
+		{"synthesize form model=nano", http.MethodPost, "/v1/audio/synthesize", "nano-edge-tts", true},
+		{"synthesize no model", http.MethodPost, "/v1/audio/synthesize", "", false},
+		{"synthesize unknown model", http.MethodPost, "/v1/audio/synthesize?model=nope", "", false},
+		{"synthesize llm model", http.MethodPost, "/v1/audio/synthesize?model=chat", "", false},
+		{"list_voices ?model=nano", http.MethodGet, "/v1/audio/list_voices?model=nano-edge-tts", "", true},
+		{"list_voices no model", http.MethodGet, "/v1/audio/list_voices", "", false},
+	}
+	for _, tc := range cases {
+		magpie.calls, nano.calls = nil, nil
+		var req *http.Request
+		if tc.method == http.MethodPost {
+			body, ct := multipartBody(tc.formModel)
+			req = httptest.NewRequest(tc.method, tc.target, strings.NewReader(body))
+			req.Header.Set("Content-Type", ct)
+		} else {
+			req = httptest.NewRequest(tc.method, tc.target, nil)
+		}
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", tc.name, rec.Code)
+		}
+		gotNano := len(nano.calls) == 1 && len(magpie.calls) == 0
+		gotMagpie := len(magpie.calls) == 1 && len(nano.calls) == 0
+		if tc.wantNano && !gotNano || !tc.wantNano && !gotMagpie {
+			t.Fatalf("%s: nano=%d magpie=%d", tc.name, len(nano.calls), len(magpie.calls))
+		}
+		if tc.formModel != "" && !strings.Contains(nano.calls[0].body, "hello") {
+			t.Fatalf("%s: buffered body not replayed: %q", tc.name, nano.calls[0].body)
+		}
+	}
+	if len(llm.calls)+len(fallback.calls) != 0 {
+		t.Fatalf("tts requests leaked to llm=%d fallback=%d", len(llm.calls), len(fallback.calls))
+	}
+}
